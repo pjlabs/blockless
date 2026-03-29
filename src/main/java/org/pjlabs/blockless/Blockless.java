@@ -9,7 +9,7 @@ public class Blockless {
 
     /**
      * Returns a supplier that will block until the completion stage is complete.
-     * Use when you want to run the completion stage now and get the result later in execution.
+     * Use when you want to eagerly run the completion stage now and get the result later in execution.
      * @param stage the completion stage
      * @param <T> the type of the value
      * @return a supplier that will block until the completion stage is complete
@@ -31,20 +31,21 @@ public class Blockless {
                 latch.await();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new RuntimeException(e);
+                throwable.set(e);
             }
         });
-        try {
-            thread.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException(e);
-        }
-        
-        if (throwable.get() != null) {
-            throw new RuntimeException(throwable.get());
-        }
-        return () -> result.get();
+        return () -> {
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throwable.set(e);
+            }
+            if (throwable.get() != null) {
+                throw new RuntimeException(throwable.get());
+            }
+            return result.get();
+        };
     }
 
     /**
