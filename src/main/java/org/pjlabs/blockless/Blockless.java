@@ -1,5 +1,6 @@
 package org.pjlabs.blockless;
 
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
@@ -57,6 +58,50 @@ public class Blockless {
      */
     public static <T> T get(CompletionStage<T> stage) {
         return supplier(stage).get();
+    }
+
+    /**
+     * Runs the callable in a virtual thread and return the value of the callable. 
+     * @param callable a callable
+     * @param <T> the type of the value
+     * @return the value of the callable
+     */
+    public static <T> Supplier<T> supplier(Callable<T> callable) {
+        var result = new AtomicReference<T>();
+        var throwable = new AtomicReference<Throwable>();
+        var thread = Thread.startVirtualThread(() -> {
+            try {
+                result.set(callable.call());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throwable.set(e);
+            } catch (Exception e) {
+                throwable.set(e);
+            }
+        });
+        return () -> {
+            try {
+                thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throwable.set(e);
+            }
+            if (throwable.get() != null) {
+                throw new RuntimeException(throwable.get());
+            }
+            return result.get();
+        };
+    }
+
+    /**
+     * Returns the value of the callable.
+     * Use when you want to run the callable now and get the result before continuing execution.
+     * @param callable the callable
+     * @param <T> the type of the value
+     * @return the value of the callable
+     */
+    public static <T> T get(Callable<T> callable) {
+        return supplier(callable).get();
     }
 
 }
