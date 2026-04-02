@@ -42,6 +42,7 @@ class CallableContextIntegrationTest {
             var wrapped = CallableContext.wrap((Callable<String>) key::get, grpc);
             var result = Blockless.get(wrapped);
             assertEquals("v", result);
+            assertEquals("v", key.get(), "submitting thread gRPC context unchanged after get");
         } finally {
             ctx.detach(prev);
         }
@@ -58,6 +59,10 @@ class CallableContextIntegrationTest {
                     () -> io.opentelemetry.context.Context.current().get(key), otel);
             var result = Blockless.get(wrapped);
             assertEquals("v", result);
+            assertEquals(
+                    "v",
+                    io.opentelemetry.context.Context.current().get(key),
+                    "submitting thread OTel context unchanged after get");
         }
     }
 }

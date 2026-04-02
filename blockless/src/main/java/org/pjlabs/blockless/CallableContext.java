@@ -18,7 +18,7 @@ public final class CallableContext {
     private CallableContext() {}
 
     /**
-     * Captures a snapshot from each propagator (e.g. to pair with {@link #wrapWithSnapshots}).
+     * Captures a snapshot from each propagator (used by {@link #wrap(Callable, List)}).
      */
     private static Map<ContextPropagator, Object> captureSnapshots(ContextPropagator... propagators) {
         return captureSnapshots(List.of(propagators));
