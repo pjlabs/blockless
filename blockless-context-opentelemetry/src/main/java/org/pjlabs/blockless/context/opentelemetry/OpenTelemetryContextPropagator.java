@@ -16,10 +16,10 @@ public final class OpenTelemetryContextPropagator implements ContextPropagator {
 
     @Override
     public Object attach(Object captured) {
-        if (captured == null) {
+        if (captured == null || !(captured instanceof Context context)) {
             return null;
         }
-        return ((Context) captured).makeCurrent();
+        return context.makeCurrent();
     }
 
     @Override
