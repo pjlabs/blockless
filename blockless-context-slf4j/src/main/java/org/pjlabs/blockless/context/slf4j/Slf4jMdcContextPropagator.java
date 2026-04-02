@@ -16,7 +16,9 @@ public final class Slf4jMdcContextPropagator implements ContextPropagator {
 
     @Override
     public Object attach(Object captured) {
-        @SuppressWarnings("unchecked")
+        if (captured == null || !(captured instanceof Map<String, String> map)) {
+            return null;
+        }
         var map = (Map<String, String>) captured;
         var previous = MDC.getCopyOfContextMap();
         if (map == null) {
@@ -29,7 +31,9 @@ public final class Slf4jMdcContextPropagator implements ContextPropagator {
 
     @Override
     public void restore(Object previous) {
-        @SuppressWarnings("unchecked")
+        if (previous == null || !(previous instanceof Map<String, String> map)) {
+            return;
+        }
         var map = (Map<String, String>) previous;
         if (map == null) {
             MDC.clear();

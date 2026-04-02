@@ -15,22 +15,23 @@ public final class GrpcContextPropagator implements ContextPropagator {
 
     @Override
     public Object attach(Object captured) {
-        if (captured == null) {
+        if (captured == null || !(captured instanceof Context context)) {
             return null;
         }
-        var ctx = (Context) captured;
-        var previous = ctx.attach();
-        return new GrpcRestore(ctx, previous);
+        return new GrpcContext(context, context.attach());
     }
 
     @Override
     public void restore(Object previous) {
-        if (previous == null) {
+        if (previous == null || !(previous instanceof GrpcContext grpcContext)) {
             return;
         }
-        var state = (GrpcRestore) previous;
-        state.captured().detach(state.previous());
+        grpcContext.restore();
     }
 
-    private record GrpcRestore(Context captured, Context previous) {}
+    private record GrpcContext(Context context, Context previous) {
+        void restore() {
+            context.detach(previous);
+        }
+    }
 }
