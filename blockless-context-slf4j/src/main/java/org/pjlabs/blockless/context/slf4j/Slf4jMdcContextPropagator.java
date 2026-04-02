@@ -16,29 +16,20 @@ public final class Slf4jMdcContextPropagator implements ContextPropagator {
 
     @Override
     public Object attach(Object captured) {
-        if (captured == null || !(captured instanceof Map<String, String> map)) {
+        if (captured == null || !(captured instanceof Map map)) {
             return null;
         }
-        var map = (Map<String, String>) captured;
         var previous = MDC.getCopyOfContextMap();
-        if (map == null) {
-            MDC.clear();
-        } else {
-            MDC.setContextMap(map);
-        }
+        MDC.setContextMap(map);   
         return previous;
     }
 
     @Override
     public void restore(Object previous) {
-        if (previous == null || !(previous instanceof Map<String, String> map)) {
+        if (previous == null || !(previous instanceof Map map)) {
+            MDC.clear();
             return;
         }
-        var map = (Map<String, String>) previous;
-        if (map == null) {
-            MDC.clear();
-        } else {
-            MDC.setContextMap(map);
-        }
+        MDC.setContextMap(map);
     }
 }

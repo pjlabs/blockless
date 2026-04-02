@@ -1,5 +1,6 @@
 package org.pjlabs.blockless;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -32,7 +33,13 @@ public final class CallableContext {
             .stream()
             .map(Objects::requireNonNull)
             .map(p -> Map.entry(p, p.capture()))
-            .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+            .collect(Collectors.toMap(
+                Map.Entry::getKey,
+                Map.Entry::getValue,
+                (a, b) -> {
+                    throw new IllegalStateException("Duplicate propagator");
+                },
+                LinkedHashMap::new));
     }
 
     /**
@@ -47,13 +54,13 @@ public final class CallableContext {
      */
     public static <T> Callable<T> wrap(Callable<T> callable, List<ContextPropagator> propagators) {
         Objects.requireNonNull(callable, "callable");
-        var snapshots = captureSnapshots(propagators);
+        var snapshots = List.copyOf(captureSnapshots(propagators).entrySet());
         return () -> {
-            snapshots.forEach((p, ctx) -> p.attach(ctx));
+            snapshots.forEach(entry -> entry.getKey().attach(entry.getValue()));
             try {
                 return callable.call();
             } finally {
-                snapshots.forEach((p, ctx) -> p.restore(ctx));
+                snapshots.reversed().forEach(entry -> entry.getKey().restore(entry.getValue()));
             }
         };
     }
