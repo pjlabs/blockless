@@ -8,6 +8,15 @@ import java.util.function.Supplier;
 
 public class Blockless {
 
+    private static final System.Logger LOGGER = System.getLogger(Blockless.class.getName());
+
+    /**
+     * Logs a friendly startup banner. Call once at application start if you like.
+     */
+    public static void roar() {
+        LOGGER.log(System.Logger.Level.INFO, "\uD83D\uDC09 blockless is ready — no platform threads were harmed");
+    }
+
     /**
      * Returns a supplier that will block until the completion stage is complete.
      * Use when you want to eagerly run the completion stage now and get the result later in execution.
