@@ -11,17 +11,19 @@ so your platform threads stay free and your context tags along for the ride.
 
 ## Why
 
-Calling `CompletableFuture.join()` from a platform thread blocks it.
-Calling it from a virtual thread is fine — but are you *sure* you're on one?
+`CompletableFuture.join()` parks your thread inside the future's own internals.
+If that implementation uses `synchronized` or you're on a platform thread, you
+could block or pin.
 
-`Blockless.get()` guarantees the wait happens on a virtual thread, so your
-platform threads stay free regardless of where you call from.
+`Blockless.get()` never enters the `CompletionStage` internals. It waits on a
+virtual thread via a `CountDownLatch` — your thread is never at risk, regardless
+of what the stage does internally.
 
 ```java
-// Are you on a platform thread? A virtual thread? Who knows.
+// Parks inside CompletableFuture internals — you're at the mercy of the implementation.
 String result = someFuture.join();
 
-// Always waits on a virtual thread. Happy dragon noises.
+// Waits on a virtual thread + latch. Your thread never touches the future. 🐉
 String result = Blockless.get(someFuture);
 ```
 
