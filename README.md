@@ -11,13 +11,17 @@ so your platform threads stay free and your context tags along for the ride.
 
 ## Why
 
-Because `CompletableFuture.join()` blocks platform threads and that's no fun.
+Calling `CompletableFuture.join()` from a platform thread blocks it.
+Calling it from a virtual thread is fine — but are you *sure* you're on one?
+
+`Blockless.get()` guarantees the wait happens on a virtual thread, so your
+platform threads stay free regardless of where you call from.
 
 ```java
-// This blocks a platform thread. Sad.
+// Are you on a platform thread? A virtual thread? Who knows.
 String result = someFuture.join();
 
-// This doesn't. Happy dragon noises.
+// Always waits on a virtual thread. Happy dragon noises.
 String result = Blockless.get(someFuture);
 ```
 
@@ -54,8 +58,11 @@ Thread-local context (MDC, gRPC context, OpenTelemetry spans) doesn't survive th
 hop to a new thread. Blockless fixes that.
 
 ```java
-// Wrap a Runnable — MDC comes along
-Runnable wrapped = RunnableContext.wrap(task, new Slf4jMdcContextPropagator());
+// Wrap a Callable — MDC comes along, get a result back
+Callable<String> wrapped = CallableContext.wrap(task, new Slf4jMdcContextPropagator());
+
+// Wrap a Runnable
+Runnable wrappedRunnable = RunnableContext.wrap(task, new Slf4jMdcContextPropagator());
 
 // Wrap an entire ExecutorService
 ExecutorService executor = PropagatingExecutorService.wrap(
