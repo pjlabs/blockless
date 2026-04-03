@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import io.grpc.Context;
 import io.opentelemetry.context.ContextKey;
 import java.util.concurrent.Callable;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.pjlabs.blockless.context.grpc.GrpcContextPropagator;
 import org.pjlabs.blockless.context.opentelemetry.OpenTelemetryContextPropagator;
@@ -46,6 +47,34 @@ class CallableContextIntegrationTest {
         } finally {
             ctx.detach(prev);
         }
+    }
+
+    @Test
+    void restoresWorkerThreadPreExistingMdc() throws Exception {
+        var mdc = new Slf4jMdcContextPropagator();
+        MDC.clear();
+        MDC.put("k", "parent-value");
+
+        var wrapped = CallableContext.wrap(() -> MDC.get("k"), mdc);
+
+        MDC.clear();
+
+        // Simulate a worker thread that already has its own MDC context
+        var workerMdcAfter = new AtomicReference<String>();
+        var workerThread = Thread.startVirtualThread(() -> {
+            MDC.put("k", "worker-value");
+            try {
+                wrapped.call();
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+            // After wrapped callable completes, worker's own MDC should be restored
+            workerMdcAfter.set(MDC.get("k"));
+        });
+        workerThread.join();
+
+        assertEquals("worker-value", workerMdcAfter.get(),
+                "worker thread's pre-existing MDC must be restored after wrapped callable executes");
     }
 
     @Test
