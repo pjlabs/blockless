@@ -4,25 +4,17 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.Callable;
 import java.util.stream.Collectors;
 
 /**
- * Static helpers to compose {@link ContextPropagator} instances and wrap {@link Callable} tasks.
+ * Static helpers to compose {@link ContextPropagator} instances and wrap {@link Runnable} tasks.
  * <p>
  * Pass propagators (from {@code blockless-context-*} modules) in attach order; restore runs in
  * reverse order.
  */
-public final class CallableContext {
+public final class RunnableContext {
 
-    private CallableContext() {}
-
-    /**
-     * Captures a snapshot from each propagator (used by {@link #wrap(Callable, List)}).
-     */
-    private static Map<ContextPropagator, Object> captureSnapshots(ContextPropagator... propagators) {
-        return captureSnapshots(List.of(propagators));
-    }
+    private RunnableContext() {}
 
     /**
      * Captures a snapshot from each propagator.
@@ -43,17 +35,17 @@ public final class CallableContext {
     }
 
     /**
-     * Wraps a {@link Callable}, capturing propagator state at wrap time.
+     * Wraps a {@link Runnable}, capturing propagator state at wrap time.
      */
-    public static <T> Callable<T> wrap(Callable<T> callable, ContextPropagator... propagators) {
-        return wrap(callable, List.of(propagators));
+    public static Runnable wrap(Runnable runnable, ContextPropagator... propagators) {
+        return wrap(runnable, List.of(propagators));
     }
 
     /**
-     * Wraps a {@link Callable}, capturing propagator state at wrap time.
+     * Wraps a {@link Runnable}, capturing propagator state at wrap time.
      */
-    public static <T> Callable<T> wrap(Callable<T> callable, List<ContextPropagator> propagators) {
-        Objects.requireNonNull(callable, "callable");
+    public static Runnable wrap(Runnable runnable, List<ContextPropagator> propagators) {
+        Objects.requireNonNull(runnable, "runnable");
         var snapshots = List.copyOf(captureSnapshots(propagators).entrySet());
         return () -> {
             var tokens = new Object[snapshots.size()];
@@ -62,7 +54,7 @@ public final class CallableContext {
                 tokens[i] = entry.getKey().attach(entry.getValue());
             }
             try {
-                return callable.call();
+                runnable.run();
             } finally {
                 for (int i = snapshots.size() - 1; i >= 0; i--) {
                     snapshots.get(i).getKey().restore(tokens[i]);
