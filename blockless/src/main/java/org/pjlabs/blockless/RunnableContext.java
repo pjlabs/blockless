@@ -4,7 +4,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
 
 /**
  * Static helpers to compose {@link ContextPropagator} instances and wrap {@link Runnable} tasks.
@@ -21,17 +20,15 @@ public final class RunnableContext {
      */
     private static Map<ContextPropagator, Object> captureSnapshots(List<ContextPropagator> propagators) {
         Objects.requireNonNull(propagators, "propagators");
-        return List.copyOf(propagators)
-            .stream()
-            .map(Objects::requireNonNull)
-            .map(p -> Map.entry(p, p.capture()))
-            .collect(Collectors.toMap(
-                Map.Entry::getKey,
-                Map.Entry::getValue,
-                (a, b) -> {
-                    throw new IllegalStateException("Duplicate propagator");
-                },
-                LinkedHashMap::new));
+        var snapshots = new LinkedHashMap<ContextPropagator, Object>();
+        for (var p : List.copyOf(propagators)) {
+            Objects.requireNonNull(p, "propagator");
+            if (snapshots.containsKey(p)) {
+                throw new IllegalStateException("Duplicate propagator");
+            }
+            snapshots.put(p, p.capture());
+        }
+        return snapshots;
     }
 
     /**
