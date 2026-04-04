@@ -17,16 +17,16 @@ class CallableContextIntegrationTest {
 
     @Test
     void propagatesMdcAcrossThreadsAndRestores() {
-        var mdc = new Slf4jMdcContextPropagator();
+        final var mdc = new Slf4jMdcContextPropagator();
         MDC.clear();
         MDC.put("k", "v");
 
-        var wrapped = CallableContext.wrap(() -> MDC.get("k"), mdc);
+        final var wrapped = CallableContext.wrap(() -> MDC.get("k"), mdc);
 
         MDC.clear();
         assertNull(MDC.get("k"));
 
-        var result = Blockless.get(wrapped);
+        final var result = Blockless.get(wrapped);
         assertEquals("v", result);
 
         assertNull(MDC.get("k"));
@@ -34,14 +34,14 @@ class CallableContextIntegrationTest {
 
     @Test
     void propagatesGrpcContextAcrossThreadsAndRestores() {
-        var grpc = new GrpcContextPropagator();
+        final var grpc = new GrpcContextPropagator();
         Context.Key<String> key = Context.key("k");
 
-        var ctx = Context.current().withValue(key, "v");
-        var prev = ctx.attach();
+        final var ctx = Context.current().withValue(key, "v");
+        final var prev = ctx.attach();
         try {
-            var wrapped = CallableContext.wrap((Callable<String>) key::get, grpc);
-            var result = Blockless.get(wrapped);
+            final var wrapped = CallableContext.wrap((Callable<String>) key::get, grpc);
+            final var result = Blockless.get(wrapped);
             assertEquals("v", result);
             assertEquals("v", key.get(), "submitting thread gRPC context unchanged after get");
         } finally {
@@ -51,17 +51,17 @@ class CallableContextIntegrationTest {
 
     @Test
     void restoresWorkerThreadPreExistingMdc() throws Exception {
-        var mdc = new Slf4jMdcContextPropagator();
+        final var mdc = new Slf4jMdcContextPropagator();
         MDC.clear();
         MDC.put("k", "parent-value");
 
-        var wrapped = CallableContext.wrap(() -> MDC.get("k"), mdc);
+        final var wrapped = CallableContext.wrap(() -> MDC.get("k"), mdc);
 
         MDC.clear();
 
         // Simulate a worker thread that already has its own MDC context
-        var workerMdcAfter = new AtomicReference<String>();
-        var workerThread = Thread.startVirtualThread(() -> {
+        final var workerMdcAfter = new AtomicReference<String>();
+        final var workerThread = Thread.startVirtualThread(() -> {
             MDC.put("k", "worker-value");
             try {
                 wrapped.call();
@@ -79,14 +79,14 @@ class CallableContextIntegrationTest {
 
     @Test
     void propagatesOpenTelemetryContextAcrossThreadsAndRestores() {
-        var otel = new OpenTelemetryContextPropagator();
+        final var otel = new OpenTelemetryContextPropagator();
         ContextKey<String> key = ContextKey.named("k");
 
-        var ctx = io.opentelemetry.context.Context.current().with(key, "v");
+        final var ctx = io.opentelemetry.context.Context.current().with(key, "v");
         try (var scope = ctx.makeCurrent()) {
-            var wrapped = CallableContext.wrap(
+            final var wrapped = CallableContext.wrap(
                     () -> io.opentelemetry.context.Context.current().get(key), otel);
-            var result = Blockless.get(wrapped);
+            final var result = Blockless.get(wrapped);
             assertEquals("v", result);
             assertEquals(
                     "v",

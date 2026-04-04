@@ -25,9 +25,9 @@ public class Blockless {
      * @return a supplier that will block until the completion stage is complete
      */
     public static <T> Supplier<T> supplier(CompletionStage<T> stage) {
-        var result = new AtomicReference<T>();
-        var throwable = new AtomicReference<Throwable>();
-        var latch = new CountDownLatch(1);
+        final var result = new AtomicReference<T>();
+        final var throwable = new AtomicReference<Throwable>();
+        final var latch = new CountDownLatch(1);
         stage.whenComplete((T v, Throwable t) -> {
             if (t != null) {
                 throwable.set(t);
@@ -36,7 +36,7 @@ public class Blockless {
             }
             latch.countDown();
         });
-        var thread = Thread.startVirtualThread(() -> {
+        final var thread = Thread.startVirtualThread(() -> {
             try {
                 latch.await();
             } catch (InterruptedException e) {
@@ -76,9 +76,9 @@ public class Blockless {
      * @return the value of the callable
      */
     public static <T> Supplier<T> supplier(Callable<T> callable) {
-        var result = new AtomicReference<T>();
-        var throwable = new AtomicReference<Throwable>();
-        var thread = Thread.startVirtualThread(() -> {
+        final var result = new AtomicReference<T>();
+        final var throwable = new AtomicReference<Throwable>();
+        final var thread = Thread.startVirtualThread(() -> {
             try {
                 result.set(callable.call());
             } catch (InterruptedException e) {

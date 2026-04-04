@@ -21,7 +21,7 @@ public final class Slf4jMdcContextPropagator implements ContextPropagator {
         }
         @SuppressWarnings("unchecked")
         Map<String, String> map = (Map<String, String>) raw;
-        var previous = MDC.getCopyOfContextMap();
+        final var previous = MDC.getCopyOfContextMap();
         MDC.setContextMap(map);
         return previous;
     }

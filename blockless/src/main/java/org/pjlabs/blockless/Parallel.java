@@ -59,7 +59,7 @@ public final class Parallel {
         Objects.requireNonNull(items, "items");
         Objects.requireNonNull(fn, "fn");
 
-        var suppliers = items.stream()
+        final var suppliers = items.stream()
                 .map(item -> async(() -> fn.apply(item)))
                 .toList();
 
@@ -76,11 +76,11 @@ public final class Parallel {
         Objects.requireNonNull(keys, "keys");
         Objects.requireNonNull(valueMapper, "valueMapper");
 
-        var entries = keys.stream()
+        final var entries = keys.stream()
                 .map(key -> Map.entry(key, async(() -> valueMapper.apply(key))))
                 .toList();
 
-        var result = new LinkedHashMap<K, V>();
+        final var result = new LinkedHashMap<K, V>();
         for (var entry : entries) {
             result.put(entry.getKey(), entry.getValue().get());
         }

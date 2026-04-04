@@ -13,19 +13,19 @@ class RunnableContextIntegrationTest {
 
     @Test
     void propagatesMdcAndRestoresCallingThread() throws Exception {
-        var mdc = new Slf4jMdcContextPropagator();
+        final var mdc = new Slf4jMdcContextPropagator();
         MDC.clear();
         MDC.put("k", "v");
 
-        var captured = new AtomicReference<String>();
-        var wrapped = RunnableContext.wrap(() -> captured.set(MDC.get("k")), mdc);
+        final var captured = new AtomicReference<String>();
+        final var wrapped = RunnableContext.wrap(() -> captured.set(MDC.get("k")), mdc);
 
         // Clear MDC after wrapping — captured state should still propagate
         MDC.clear();
         assertNull(MDC.get("k"));
 
         // Run on a virtual thread
-        var thread = Thread.startVirtualThread(wrapped);
+        final var thread = Thread.startVirtualThread(wrapped);
         thread.join();
 
         assertEquals("v", captured.get(), "wrapped runnable should see captured MDC");
@@ -34,11 +34,11 @@ class RunnableContextIntegrationTest {
 
     @Test
     void restoresWorkerThreadPreExistingContext() throws Exception {
-        var mdc = new Slf4jMdcContextPropagator();
+        final var mdc = new Slf4jMdcContextPropagator();
         MDC.clear();
         MDC.put("k", "parent-value");
 
-        var wrapped = RunnableContext.wrap(() -> {
+        final var wrapped = RunnableContext.wrap(() -> {
             // Inside the wrapped runnable, should see "parent-value"
             assertEquals("parent-value", MDC.get("k"));
         }, mdc);
@@ -46,8 +46,8 @@ class RunnableContextIntegrationTest {
         MDC.clear();
 
         // Simulate a worker thread that already has its own MDC context
-        var workerMdcAfter = new AtomicReference<String>();
-        var workerThread = Thread.startVirtualThread(() -> {
+        final var workerMdcAfter = new AtomicReference<String>();
+        final var workerThread = Thread.startVirtualThread(() -> {
             MDC.put("k", "worker-value");
             wrapped.run();
             // After wrapped runnable completes, worker's own MDC should be restored
