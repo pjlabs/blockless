@@ -20,7 +20,7 @@ public final class RunnableContext {
      */
     private static Map<ContextPropagator, Object> captureSnapshots(List<ContextPropagator> propagators) {
         Objects.requireNonNull(propagators, "propagators");
-        var snapshots = new LinkedHashMap<ContextPropagator, Object>();
+        final var snapshots = new LinkedHashMap<ContextPropagator, Object>();
         for (var p : List.copyOf(propagators)) {
             Objects.requireNonNull(p, "propagator");
             if (snapshots.containsKey(p)) {
@@ -43,11 +43,11 @@ public final class RunnableContext {
      */
     public static Runnable wrap(Runnable runnable, List<ContextPropagator> propagators) {
         Objects.requireNonNull(runnable, "runnable");
-        var snapshots = List.copyOf(captureSnapshots(propagators).entrySet());
+        final var snapshots = List.copyOf(captureSnapshots(propagators).entrySet());
         return () -> {
-            var tokens = new Object[snapshots.size()];
+            final var tokens = new Object[snapshots.size()];
             for (int i = 0; i < snapshots.size(); i++) {
-                var entry = snapshots.get(i);
+                final var entry = snapshots.get(i);
                 tokens[i] = entry.getKey().attach(entry.getValue());
             }
             try {

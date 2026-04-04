@@ -26,7 +26,7 @@ class PropagatingExecutorServiceTest {
             MDC.put("traceId", "abc-123");
 
             try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-                var future = executor.submit(() -> MDC.get("traceId"));
+                final var future = executor.submit(() -> MDC.get("traceId"));
                 assertNull(future.get(), "plain virtual thread executor must lose MDC");
             } finally {
                 MDC.clear();
@@ -39,7 +39,7 @@ class PropagatingExecutorServiceTest {
             MDC.put("traceId", "abc-123");
 
             try (var executor = Executors.newFixedThreadPool(1)) {
-                var future = executor.submit(() -> MDC.get("traceId"));
+                final var future = executor.submit(() -> MDC.get("traceId"));
                 assertNull(future.get(), "plain platform thread pool must lose MDC");
             } finally {
                 MDC.clear();
@@ -58,7 +58,7 @@ class PropagatingExecutorServiceTest {
             try (var executor = PropagatingExecutorService.wrap(
                     Executors.newVirtualThreadPerTaskExecutor(),
                     new Slf4jMdcContextPropagator())) {
-                var future = executor.submit(() -> MDC.get("traceId"));
+                final var future = executor.submit(() -> MDC.get("traceId"));
                 assertEquals("abc-123", future.get());
             } finally {
                 MDC.clear();
@@ -69,12 +69,12 @@ class PropagatingExecutorServiceTest {
         void submitRunnablePreservesMdc() throws Exception {
             MDC.clear();
             MDC.put("traceId", "abc-123");
-            var captured = new AtomicReference<String>();
+            final var captured = new AtomicReference<String>();
 
             try (var executor = PropagatingExecutorService.wrap(
                     Executors.newVirtualThreadPerTaskExecutor(),
                     new Slf4jMdcContextPropagator())) {
-                var future = executor.submit(() -> captured.set(MDC.get("traceId")));
+                final var future = executor.submit(() -> captured.set(MDC.get("traceId")));
                 future.get();
                 assertEquals("abc-123", captured.get());
             } finally {
@@ -86,8 +86,8 @@ class PropagatingExecutorServiceTest {
         void executePreservesMdc() throws Exception {
             MDC.clear();
             MDC.put("traceId", "abc-123");
-            var captured = new AtomicReference<String>();
-            var latch = new java.util.concurrent.CountDownLatch(1);
+            final var captured = new AtomicReference<String>();
+            final var latch = new java.util.concurrent.CountDownLatch(1);
 
             try (var executor = PropagatingExecutorService.wrap(
                     Executors.newVirtualThreadPerTaskExecutor(),
@@ -116,7 +116,7 @@ class PropagatingExecutorServiceTest {
             try (var executor = PropagatingExecutorService.wrap(
                     Executors.newVirtualThreadPerTaskExecutor(),
                     new Slf4jMdcContextPropagator())) {
-                var futures = executor.invokeAll(tasks);
+                final var futures = executor.invokeAll(tasks);
                 for (Future<String> f : futures) {
                     assertEquals("abc-123", f.get());
                 }
@@ -130,7 +130,7 @@ class PropagatingExecutorServiceTest {
             try (var executor = PropagatingExecutorService.wrap(
                     Executors.newVirtualThreadPerTaskExecutor(),
                     new Slf4jMdcContextPropagator())) {
-                var future = executor.submit(() -> Thread.currentThread().isVirtual());
+                final var future = executor.submit(() -> Thread.currentThread().isVirtual());
                 assertTrue(future.get(), "tasks must run on virtual threads");
             }
         }
@@ -139,7 +139,7 @@ class PropagatingExecutorServiceTest {
         void workerThreadContextRestoredAfterExecution() throws Exception {
             MDC.clear();
             MDC.put("traceId", "parent-value");
-            var workerMdcAfter = new AtomicReference<String>();
+            final var workerMdcAfter = new AtomicReference<String>();
 
             try (var executor = PropagatingExecutorService.wrap(
                     Executors.newVirtualThreadPerTaskExecutor(),
@@ -147,7 +147,7 @@ class PropagatingExecutorServiceTest {
                 // Submit a task that checks MDC, then manually run another task on the
                 // same virtual thread to verify restoration. Since virtual threads are
                 // one-per-task, we verify restoration within the same task instead.
-                var future = executor.submit(() -> {
+                final var future = executor.submit(() -> {
                     // Before the wrapped task body runs, the propagator has attached
                     // "parent-value". After it completes, restore should clean up.
                     // We verify by checking MDC inside the task sees the propagated value.

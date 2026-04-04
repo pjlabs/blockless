@@ -28,7 +28,7 @@ public final class CallableContext {
      */
     private static Map<ContextPropagator, Object> captureSnapshots(List<ContextPropagator> propagators) {
         Objects.requireNonNull(propagators, "propagators");
-        var snapshots = new LinkedHashMap<ContextPropagator, Object>();
+        final var snapshots = new LinkedHashMap<ContextPropagator, Object>();
         for (var p : List.copyOf(propagators)) {
             Objects.requireNonNull(p, "propagator");
             if (snapshots.containsKey(p)) {
@@ -51,11 +51,11 @@ public final class CallableContext {
      */
     public static <T> Callable<T> wrap(Callable<T> callable, List<ContextPropagator> propagators) {
         Objects.requireNonNull(callable, "callable");
-        var snapshots = List.copyOf(captureSnapshots(propagators).entrySet());
+        final var snapshots = List.copyOf(captureSnapshots(propagators).entrySet());
         return () -> {
-            var tokens = new Object[snapshots.size()];
+            final var tokens = new Object[snapshots.size()];
             for (int i = 0; i < snapshots.size(); i++) {
-                var entry = snapshots.get(i);
+                final var entry = snapshots.get(i);
                 tokens[i] = entry.getKey().attach(entry.getValue());
             }
             try {

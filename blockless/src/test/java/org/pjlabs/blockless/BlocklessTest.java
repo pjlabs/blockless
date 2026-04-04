@@ -19,7 +19,7 @@ class BlocklessTest {
 
         @Test
         void waitsForDelayedStage() {
-            var stage = CompletableFuture.supplyAsync(
+            final var stage = CompletableFuture.supplyAsync(
                     () -> "later",
                     CompletableFuture.delayedExecutor(50, TimeUnit.MILLISECONDS));
             assertEquals("later", Blockless.get(stage));
@@ -32,28 +32,28 @@ class BlocklessTest {
 
         @Test
         void wrapsExceptionWithCausePreserved() {
-            var stage = CompletableFuture.failedFuture(new IllegalArgumentException("bad input"));
-            var thrown = assertThrows(RuntimeException.class, () -> Blockless.get(stage));
+            final var stage = CompletableFuture.failedFuture(new IllegalArgumentException("bad input"));
+            final var thrown = assertThrows(RuntimeException.class, () -> Blockless.get(stage));
             assertInstanceOf(IllegalArgumentException.class, thrown.getCause());
             assertEquals("bad input", thrown.getCause().getMessage());
         }
 
         @Test
         void handlesAlreadyFailedStage() {
-            var stage = new CompletableFuture<String>();
+            final var stage = new CompletableFuture<String>();
             stage.completeExceptionally(new RuntimeException("already failed"));
 
-            var thrown = assertThrows(RuntimeException.class, () -> Blockless.get(stage));
+            final var thrown = assertThrows(RuntimeException.class, () -> Blockless.get(stage));
             assertEquals("already failed", thrown.getCause().getMessage());
         }
 
         @Test
         void supplierDefersAndCanBeReused() {
-            var stage = CompletableFuture.supplyAsync(
+            final var stage = CompletableFuture.supplyAsync(
                     () -> "deferred",
                     CompletableFuture.delayedExecutor(50, TimeUnit.MILLISECONDS));
 
-            var supplier = Blockless.supplier(stage);
+            final var supplier = Blockless.supplier(stage);
 
             // blocks until complete, then returns same value on repeated calls
             assertEquals("deferred", supplier.get());
@@ -65,7 +65,7 @@ class BlocklessTest {
             // Stage completes on ForkJoinPool (default) — Blockless.get should
             // still work because it uses its own virtual thread + latch, not the
             // stage's executor
-            var stage = CompletableFuture.supplyAsync(() -> {
+            final var stage = CompletableFuture.supplyAsync(() -> {
                 try { Thread.sleep(30); } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
@@ -94,25 +94,25 @@ class BlocklessTest {
 
         @Test
         void wrapsUncheckedExceptionWithCausePreserved() {
-            var thrown = assertThrows(RuntimeException.class,
+            final var thrown = assertThrows(RuntimeException.class,
                     () -> Blockless.get(() -> { throw new IllegalStateException("broken"); }));
             assertInstanceOf(IllegalStateException.class, thrown.getCause());
         }
 
         @Test
         void wrapsCheckedExceptionInRuntimeException() {
-            var thrown = assertThrows(RuntimeException.class,
+            final var thrown = assertThrows(RuntimeException.class,
                     () -> Blockless.get(() -> { throw new java.io.IOException("disk error"); }));
             assertInstanceOf(java.io.IOException.class, thrown.getCause());
         }
 
         @Test
         void supplierPropagatesException() {
-            var supplier = Blockless.supplier(() -> {
+            final var supplier = Blockless.supplier(() -> {
                 throw new IllegalArgumentException("bad");
             });
 
-            var thrown = assertThrows(RuntimeException.class, supplier::get);
+            final var thrown = assertThrows(RuntimeException.class, supplier::get);
             assertInstanceOf(IllegalArgumentException.class, thrown.getCause());
         }
     }

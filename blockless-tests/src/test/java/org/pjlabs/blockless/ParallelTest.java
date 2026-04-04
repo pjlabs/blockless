@@ -30,8 +30,8 @@ class ParallelTest {
     @Test
     void mapReturnsResultsInInputOrder() {
         // Items with variable sleep times — results must match input order, not completion order
-        var items = List.of(3, 1, 2);
-        var results = parallel.map(items, i -> {
+        final var items = List.of(3, 1, 2);
+        final var results = parallel.map(items, i -> {
             try {
                 Thread.sleep(i * 20L);
             } catch (InterruptedException e) {
@@ -45,10 +45,10 @@ class ParallelTest {
 
     @Test
     void mapRunsConcurrently() {
-        var maxConcurrent = new AtomicInteger(0);
-        var current = new AtomicInteger(0);
+        final var maxConcurrent = new AtomicInteger(0);
+        final var current = new AtomicInteger(0);
 
-        var items = List.of(1, 2, 3, 4, 5);
+        final var items = List.of(1, 2, 3, 4, 5);
         parallel.map(items, i -> {
             int c = current.incrementAndGet();
             maxConcurrent.updateAndGet(max -> Math.max(max, c));
@@ -69,7 +69,7 @@ class ParallelTest {
     void mapPropagatesMdc() {
         MDC.put("traceId", "trace-abc");
 
-        var results = parallel.map(List.of(1, 2, 3), i -> MDC.get("traceId"));
+        final var results = parallel.map(List.of(1, 2, 3), i -> MDC.get("traceId"));
 
         assertTrue(results.stream().allMatch("trace-abc"::equals),
                 "all tasks must see the propagated MDC value");
@@ -77,7 +77,7 @@ class ParallelTest {
 
     @Test
     void mapRunsOnVirtualThreads() {
-        var results = parallel.map(List.of(1, 2, 3),
+        final var results = parallel.map(List.of(1, 2, 3),
                 i -> Thread.currentThread().isVirtual());
 
         assertTrue(results.stream().allMatch(Boolean::booleanValue),
@@ -102,20 +102,20 @@ class ParallelTest {
     void asyncPropagatesMdc() {
         MDC.put("traceId", "trace-xyz");
 
-        var supplier = parallel.async(() -> MDC.get("traceId"));
+        final var supplier = parallel.async(() -> MDC.get("traceId"));
         assertEquals("trace-xyz", supplier.get());
     }
 
     @Test
     void asyncRunsOnVirtualThread() {
-        var supplier = parallel.async(() -> Thread.currentThread().isVirtual());
+        final var supplier = parallel.async(() -> Thread.currentThread().isVirtual());
         assertTrue(supplier.get());
     }
 
     @Test
     void asMapPreservesKeyOrder() {
-        var keys = List.of("c", "a", "b");
-        var result = parallel.asMap(keys, k -> k.toUpperCase());
+        final var keys = List.of("c", "a", "b");
+        final var result = parallel.asMap(keys, k -> k.toUpperCase());
 
         assertEquals(List.of("c", "a", "b"), List.copyOf(result.keySet()),
                 "keys must preserve iteration order");
@@ -128,7 +128,7 @@ class ParallelTest {
     void asMapPropagatesMdc() {
         MDC.put("traceId", "trace-map");
 
-        var result = parallel.asMap(List.of("x", "y"), k -> MDC.get("traceId"));
+        final var result = parallel.asMap(List.of("x", "y"), k -> MDC.get("traceId"));
 
         assertTrue(result.values().stream().allMatch("trace-map"::equals),
                 "all asMap tasks must see the propagated MDC value");

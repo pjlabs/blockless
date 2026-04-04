@@ -36,9 +36,9 @@ class EmpiricalVerificationTest {
         @Test
         void virtualThreadLosesMdc() throws Exception {
             MDC.put("traceId", "abc-123");
-            var captured = new AtomicReference<String>();
+            final var captured = new AtomicReference<String>();
 
-            var thread = Thread.startVirtualThread(() -> captured.set(MDC.get("traceId")));
+            final var thread = Thread.startVirtualThread(() -> captured.set(MDC.get("traceId")));
             thread.join();
 
             assertNull(captured.get(), "plain virtual thread must lose MDC — this is the problem blockless solves");
@@ -47,10 +47,10 @@ class EmpiricalVerificationTest {
         @Test
         void platformThreadLosesMdc() throws Exception {
             MDC.put("traceId", "abc-123");
-            var captured = new AtomicReference<String>();
+            final var captured = new AtomicReference<String>();
 
             try (var executor = Executors.newFixedThreadPool(1)) {
-                var future = executor.submit(() -> captured.set(MDC.get("traceId")));
+                final var future = executor.submit(() -> captured.set(MDC.get("traceId")));
                 future.get();
             }
 
@@ -65,28 +65,28 @@ class EmpiricalVerificationTest {
         void callableContextPreservesMdc() throws Exception {
             MDC.put("traceId", "abc-123");
 
-            var wrapped = CallableContext.wrap(
+            final var wrapped = CallableContext.wrap(
                     () -> MDC.get("traceId"),
                     new Slf4jMdcContextPropagator());
 
             MDC.clear();
 
-            var result = Blockless.get(wrapped);
+            final var result = Blockless.get(wrapped);
             assertEquals("abc-123", result, "CallableContext.wrap must propagate MDC to the executing thread");
         }
 
         @Test
         void runnableContextPreservesMdc() throws Exception {
             MDC.put("traceId", "abc-123");
-            var captured = new AtomicReference<String>();
+            final var captured = new AtomicReference<String>();
 
-            var wrapped = RunnableContext.wrap(
+            final var wrapped = RunnableContext.wrap(
                     () -> captured.set(MDC.get("traceId")),
                     new Slf4jMdcContextPropagator());
 
             MDC.clear();
 
-            var thread = Thread.startVirtualThread(wrapped);
+            final var thread = Thread.startVirtualThread(wrapped);
             thread.join();
 
             assertEquals("abc-123", captured.get(), "RunnableContext.wrap must propagate MDC to the executing thread");
@@ -94,7 +94,7 @@ class EmpiricalVerificationTest {
 
         @Test
         void blocklessGetRunsOnVirtualThread() {
-            var isVirtual = Blockless.get(() -> Thread.currentThread().isVirtual());
+            final var isVirtual = Blockless.get(() -> Thread.currentThread().isVirtual());
             assertTrue(isVirtual, "Blockless.get(Callable) must execute on a virtual thread");
         }
 
@@ -105,8 +105,8 @@ class EmpiricalVerificationTest {
             // With virtual threads, all 100 run concurrently and complete in ~50ms + overhead.
             int taskCount = 100;
             long sleepMs = 50;
-            var latch = new CountDownLatch(taskCount);
-            var threads = new Thread[taskCount];
+            final var latch = new CountDownLatch(taskCount);
+            final var threads = new Thread[taskCount];
 
             long start = System.nanoTime();
             for (int i = 0; i < taskCount; i++) {
