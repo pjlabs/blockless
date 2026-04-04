@@ -54,6 +54,7 @@ Java 21 required. No preview features.
   - Use descriptive variable names so the type is clear from context
 - **Method references over lambdas** when possible: `Supplier::get` over `s -> s.get()`
 - **Avoid Optional as method parameters**
+- **Google Java Format**: enforced via `fmt-maven-plugin`, auto-formats on `mvn compile`
 
 ## When in Doubt
 
