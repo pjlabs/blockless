@@ -3,37 +3,37 @@ package org.pjlabs.blockless;
 import java.util.Objects;
 
 /**
- * A value that is either a successful {@link #response()} or a failing {@link #error()}, never
+ * A value that is either a successful {@link #result()} or a failing {@link #failure()}, never
  * both.
  */
-public record Either<Response, Error>(Response response, Error error) {
+public record Either<Result, Failure>(Result result, Failure failure) {
 
   public Either {
-    if (response == null && error == null) {
-      throw new IllegalArgumentException("Either must have a response or an error");
+    if (result == null && failure == null) {
+      throw new IllegalArgumentException("Either must have a result or a failure");
     }
-    if (response != null && error != null) {
-      throw new IllegalArgumentException("Either cannot have both a response and an error");
+    if (result != null && failure != null) {
+      throw new IllegalArgumentException("Either cannot have both a result and a failure");
     }
   }
 
-  /** Success: {@code response} is set, {@code error} is {@code null}. */
-  public static <R, E> Either<R, E> ok(R response) {
-    return new Either<>(Objects.requireNonNull(response, "response"), null);
+  /** Success: {@code result} is set, {@code failure} is {@code null}. */
+  public static <R, F> Either<R, F> ok(R result) {
+    return new Either<>(Objects.requireNonNull(result, "result"), null);
   }
 
-  /** Failure: {@code error} is set, {@code response} is {@code null}. */
-  public static <R, E> Either<R, E> err(E error) {
-    return new Either<>(null, Objects.requireNonNull(error, "error"));
+  /** Failure: {@code failure} is set, {@code result} is {@code null}. */
+  public static <R, F> Either<R, F> fail(F failure) {
+    return new Either<>(null, Objects.requireNonNull(failure, "failure"));
   }
 
-  /** {@code true} when this instance holds a response (success). */
+  /** {@code true} when this instance holds a successful result. */
   public boolean isOk() {
-    return error == null;
+    return failure == null;
   }
 
-  /** {@code true} when this instance holds an error (failure). */
-  public boolean isErr() {
-    return response == null;
+  /** {@code true} when this instance holds a failure. */
+  public boolean isFailed() {
+    return result == null;
   }
 }

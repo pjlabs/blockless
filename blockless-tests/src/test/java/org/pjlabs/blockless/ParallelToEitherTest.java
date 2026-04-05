@@ -37,9 +37,9 @@ class ParallelToEitherTest {
       final var eithers = parallel.toEither(List.of(1, 2, 3), i -> i * 10);
 
       assertEquals(3, eithers.size());
-      assertEquals(10, eithers.get(0).response());
-      assertEquals(20, eithers.get(1).response());
-      assertEquals(30, eithers.get(2).response());
+      assertEquals(10, eithers.get(0).result());
+      assertEquals(20, eithers.get(1).result());
+      assertEquals(30, eithers.get(2).result());
       assertTrue(eithers.stream().allMatch(Either::isOk));
     }
 
@@ -56,10 +56,10 @@ class ParallelToEitherTest {
               });
 
       assertEquals(3, eithers.size());
-      assertEquals(10, eithers.get(0).response());
-      assertTrue(eithers.get(1).isErr());
-      assertInstanceOf(IllegalArgumentException.class, eithers.get(1).error());
-      assertEquals(30, eithers.get(2).response());
+      assertEquals(10, eithers.get(0).result());
+      assertTrue(eithers.get(1).isFailed());
+      assertInstanceOf(IllegalArgumentException.class, eithers.get(1).failure());
+      assertEquals(30, eithers.get(2).result());
     }
 
     @Test
@@ -72,7 +72,7 @@ class ParallelToEitherTest {
               });
 
       assertEquals(3, eithers.size());
-      assertTrue(eithers.stream().allMatch(Either::isErr));
+      assertTrue(eithers.stream().allMatch(Either::isFailed));
     }
 
     @Test
@@ -85,9 +85,9 @@ class ParallelToEitherTest {
               });
 
       assertEquals(1, eithers.size());
-      assertTrue(eithers.get(0).isErr());
-      assertInstanceOf(IllegalStateException.class, eithers.get(0).error());
-      assertEquals("original", eithers.get(0).error().getMessage());
+      assertTrue(eithers.get(0).isFailed());
+      assertInstanceOf(IllegalStateException.class, eithers.get(0).failure());
+      assertEquals("original", eithers.get(0).failure().getMessage());
     }
 
     @Test
@@ -121,7 +121,7 @@ class ParallelToEitherTest {
       final var eithers = parallel.toEither(List.of(1, 2, 3), i -> MDC.get("traceId"));
 
       assertTrue(
-          eithers.stream().map(Either::response).allMatch("trace-try"::equals),
+          eithers.stream().map(Either::result).allMatch("trace-try"::equals),
           "all tasks must see the propagated MDC value");
     }
   }
@@ -141,9 +141,9 @@ class ParallelToEitherTest {
                 return key.toUpperCase();
               });
 
-      assertEquals("GOOD", map.get("good").response());
-      assertTrue(map.get("bad").isErr());
-      assertInstanceOf(IllegalArgumentException.class, map.get("bad").error());
+      assertEquals("GOOD", map.get("good").result());
+      assertTrue(map.get("bad").isFailed());
+      assertInstanceOf(IllegalArgumentException.class, map.get("bad").failure());
     }
 
     @Test
