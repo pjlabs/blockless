@@ -81,9 +81,9 @@ public final class Parallel {
 
   /**
    * Like {@link #map}, but collects per-item results instead of failing fast. Every task runs to
-   * completion. The returned list matches {@code items} in order; each element is either a {@link
-   * Either#ok(Object) response} or an {@link Either#fail(Object) error} (the cause is unwrapped
-   * from {@link RuntimeException} when present).
+   * completion. The returned list matches {@code items} in order; each element is either {@link
+   * Either#ok(Object)} or {@link Either#fail(Object)}. The cause is unwrapped from {@link
+   * RuntimeException} when present.
    */
   public <T, R> List<Either<R, Throwable>> toEither(List<T> items, Function<T, R> fn) {
     Objects.requireNonNull(items, "items");
@@ -107,8 +107,8 @@ public final class Parallel {
   /**
    * Like {@link #asMap}, but collects per-key results instead of failing fast. Every task runs to
    * completion. The returned map is keyed by {@code keys} with iteration order preserved; each
-   * value is either a {@link Either#ok(Object) response} or an {@link Either#fail(Object) error}
-   * (the cause is unwrapped from {@link RuntimeException} when present).
+   * value is either {@link Either#ok(Object)} or {@link Either#fail(Object)}. The cause is
+   * unwrapped from {@link RuntimeException} when present.
    */
   public <K, V> Map<K, Either<V, Throwable>> toEitherMap(
       Collection<K> keys, Function<K, V> valueMapper) {
