@@ -79,27 +79,28 @@ public final class Parallel {
   }
 
   /**
-   * Like {@link #map}, but collects partial results instead of failing fast. Every task runs to
-   * completion; successes and failures are reported separately in the returned {@link Outcome}.
+   * Like {@link #map}, but collects per-item results instead of failing fast. Every task runs to
+   * completion. The returned list matches {@code items} in order; each element is either a {@link
+   * Either#ok(Object) response} or an {@link Either#err(Object) error} (the cause is unwrapped from
+   * {@link RuntimeException} when present).
    */
-  public <T, R> Outcome<R> tryMap(List<T> items, Function<T, R> fn) {
+  public <T, R> List<Either<R, Throwable>> toEither(List<T> items, Function<T, R> fn) {
     Objects.requireNonNull(items, "items");
     Objects.requireNonNull(fn, "fn");
 
     final var suppliers = items.stream().map(item -> async(() -> fn.apply(item))).toList();
 
-    final var successes = new ArrayList<R>();
-    final var failures = new ArrayList<Throwable>();
+    final var results = new ArrayList<Either<R, Throwable>>(suppliers.size());
 
     for (final var supplier : suppliers) {
       try {
-        successes.add(supplier.get());
+        results.add(Either.ok(supplier.get()));
       } catch (final RuntimeException e) {
-        failures.add(e.getCause() != null ? e.getCause() : e);
+        results.add(Either.err(e.getCause() != null ? e.getCause() : e));
       }
     }
 
-    return new Outcome<>(successes, failures);
+    return List.copyOf(results);
   }
 
   /**

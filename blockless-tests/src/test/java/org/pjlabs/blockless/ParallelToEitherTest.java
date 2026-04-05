@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
 import org.slf4j.MDC;
 
-class ParallelTryMapTest {
+class ParallelToEitherTest {
 
   private Parallel parallel;
 
@@ -31,21 +31,23 @@ class ParallelTryMapTest {
   }
 
   @Nested
-  class TryMap {
+  class ToEither {
 
     @Test
-    void returnsAllSuccessesWhenNoFailures() {
-      final var outcome = parallel.tryMap(List.of(1, 2, 3), i -> i * 10);
+    void returnsAllResponsesWhenNoFailures() {
+      final var eithers = parallel.toEither(List.of(1, 2, 3), i -> i * 10);
 
-      assertEquals(List.of(10, 20, 30), outcome.successes());
-      assertTrue(outcome.failures().isEmpty());
-      assertTrue(outcome.isComplete());
+      assertEquals(3, eithers.size());
+      assertEquals(10, eithers.get(0).response());
+      assertEquals(20, eithers.get(1).response());
+      assertEquals(30, eithers.get(2).response());
+      assertTrue(eithers.stream().allMatch(Either::isOk));
     }
 
     @Test
-    void collectsPartialResultsOnFailure() {
-      final var outcome =
-          parallel.tryMap(
+    void collectsPerIndexResultsOnFailure() {
+      final var eithers =
+          parallel.toEither(
               List.of(1, 2, 3),
               i -> {
                 if (i == 2) {
@@ -54,37 +56,39 @@ class ParallelTryMapTest {
                 return i * 10;
               });
 
-      assertEquals(List.of(10, 30), outcome.successes());
-      assertEquals(1, outcome.failures().size());
-      assertFalse(outcome.isComplete());
+      assertEquals(3, eithers.size());
+      assertEquals(10, eithers.get(0).response());
+      assertTrue(eithers.get(1).isErr());
+      assertInstanceOf(IllegalArgumentException.class, eithers.get(1).error());
+      assertEquals(30, eithers.get(2).response());
     }
 
     @Test
     void collectsAllFailures() {
-      final var outcome =
-          parallel.tryMap(
+      final var eithers =
+          parallel.toEither(
               List.of(1, 2, 3),
               i -> {
                 throw new RuntimeException("fail: " + i);
               });
 
-      assertTrue(outcome.successes().isEmpty());
-      assertEquals(3, outcome.failures().size());
-      assertFalse(outcome.isComplete());
+      assertEquals(3, eithers.size());
+      assertTrue(eithers.stream().allMatch(Either::isErr));
     }
 
     @Test
     void preservesOriginalException() {
-      final var outcome =
-          parallel.tryMap(
+      final var eithers =
+          parallel.toEither(
               List.of(1),
               i -> {
                 throw new IllegalStateException("original");
               });
 
-      assertEquals(1, outcome.failures().size());
-      assertInstanceOf(IllegalStateException.class, outcome.failures().get(0));
-      assertEquals("original", outcome.failures().get(0).getMessage());
+      assertEquals(1, eithers.size());
+      assertTrue(eithers.get(0).isErr());
+      assertInstanceOf(IllegalStateException.class, eithers.get(0).error());
+      assertEquals("original", eithers.get(0).error().getMessage());
     }
 
     @Test
@@ -92,7 +96,7 @@ class ParallelTryMapTest {
       final var maxConcurrent = new AtomicInteger(0);
       final var current = new AtomicInteger(0);
 
-      parallel.tryMap(
+      parallel.toEither(
           List.of(1, 2, 3, 4, 5),
           i -> {
             final int c = current.incrementAndGet();
@@ -115,10 +119,10 @@ class ParallelTryMapTest {
     void propagatesMdc() {
       MDC.put("traceId", "trace-try");
 
-      final var outcome = parallel.tryMap(List.of(1, 2, 3), i -> MDC.get("traceId"));
+      final var eithers = parallel.toEither(List.of(1, 2, 3), i -> MDC.get("traceId"));
 
       assertTrue(
-          outcome.successes().stream().allMatch("trace-try"::equals),
+          eithers.stream().map(Either::response).allMatch("trace-try"::equals),
           "all tasks must see the propagated MDC value");
     }
   }
