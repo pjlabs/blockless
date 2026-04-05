@@ -1,7 +1,6 @@
 package org.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -128,12 +127,12 @@ class ParallelToEitherTest {
   }
 
   @Nested
-  class TryAsMap {
+  class ToEitherMap {
 
     @Test
-    void associatesFailuresWithKeys() {
-      final var outcome =
-          parallel.tryAsMap(
+    void associatesErrorsWithKeys() {
+      final var map =
+          parallel.toEitherMap(
               List.of("good", "bad"),
               key -> {
                 if ("bad".equals(key)) {
@@ -142,17 +141,17 @@ class ParallelToEitherTest {
                 return key.toUpperCase();
               });
 
-      assertEquals("GOOD", outcome.successes().get("good"));
-      assertInstanceOf(IllegalArgumentException.class, outcome.failures().get("bad"));
-      assertFalse(outcome.isComplete());
+      assertEquals("GOOD", map.get("good").response());
+      assertTrue(map.get("bad").isErr());
+      assertInstanceOf(IllegalArgumentException.class, map.get("bad").error());
     }
 
     @Test
     void preservesKeyOrder() {
-      final var outcome = parallel.tryAsMap(List.of("c", "a", "b"), String::toUpperCase);
+      final var map = parallel.toEitherMap(List.of("c", "a", "b"), String::toUpperCase);
 
-      assertEquals(List.of("c", "a", "b"), List.copyOf(outcome.successes().keySet()));
-      assertTrue(outcome.isComplete());
+      assertEquals(List.of("c", "a", "b"), List.copyOf(map.keySet()));
+      assertTrue(map.values().stream().allMatch(Either::isOk));
     }
   }
 

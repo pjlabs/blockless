@@ -2,6 +2,7 @@ package org.pjlabs.blockless;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -104,28 +105,29 @@ public final class Parallel {
   }
 
   /**
-   * Like {@link #asMap}, but collects partial results instead of failing fast. Every task runs to
-   * completion; successes and failures are reported separately in the returned {@link MapOutcome},
-   * keyed by the original input key.
+   * Like {@link #asMap}, but collects per-key results instead of failing fast. Every task runs to
+   * completion. The returned map is keyed by {@code keys} with iteration order preserved; each
+   * value is either a {@link Either#ok(Object) response} or an {@link Either#err(Object) error}
+   * (the cause is unwrapped from {@link RuntimeException} when present).
    */
-  public <K, V> MapOutcome<K, V> tryAsMap(Collection<K> keys, Function<K, V> valueMapper) {
+  public <K, V> Map<K, Either<V, Throwable>> toEitherMap(
+      Collection<K> keys, Function<K, V> valueMapper) {
     Objects.requireNonNull(keys, "keys");
     Objects.requireNonNull(valueMapper, "valueMapper");
 
     final var entries =
         keys.stream().map(key -> Map.entry(key, async(() -> valueMapper.apply(key)))).toList();
 
-    final var successes = new LinkedHashMap<K, V>();
-    final var failures = new LinkedHashMap<K, Throwable>();
+    final var result = new LinkedHashMap<K, Either<V, Throwable>>();
 
     for (final var entry : entries) {
       try {
-        successes.put(entry.getKey(), entry.getValue().get());
+        result.put(entry.getKey(), Either.ok(entry.getValue().get()));
       } catch (final RuntimeException e) {
-        failures.put(entry.getKey(), e.getCause() != null ? e.getCause() : e);
+        result.put(entry.getKey(), Either.err(e.getCause() != null ? e.getCause() : e));
       }
     }
 
-    return new MapOutcome<>(successes, failures);
+    return Collections.unmodifiableMap(new LinkedHashMap<>(result));
   }
 }
