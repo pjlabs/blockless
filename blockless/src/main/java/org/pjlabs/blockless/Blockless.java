@@ -75,7 +75,7 @@ public class Blockless {
   }
 
   /**
-   * Runs the callable in a virtual thread and return the value of the callable.
+   * Runs the callable in a virtual thread and returns the value of the callable.
    *
    * @param callable a callable
    * @param <T> the type of the value
