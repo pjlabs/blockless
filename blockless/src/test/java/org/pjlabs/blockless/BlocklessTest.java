@@ -30,11 +30,10 @@ class BlocklessTest {
     }
 
     @Test
-    void wrapsExceptionWithCausePreserved() {
+    void rethrowsRuntimeExceptionDirectly() {
       final var stage = CompletableFuture.failedFuture(new IllegalArgumentException("bad input"));
-      final var thrown = assertThrows(RuntimeException.class, () -> Blockless.get(stage));
-      assertInstanceOf(IllegalArgumentException.class, thrown.getCause());
-      assertEquals("bad input", thrown.getCause().getMessage());
+      final var thrown = assertThrows(IllegalArgumentException.class, () -> Blockless.get(stage));
+      assertEquals("bad input", thrown.getMessage());
     }
 
     @Test
@@ -43,7 +42,7 @@ class BlocklessTest {
       stage.completeExceptionally(new RuntimeException("already failed"));
 
       final var thrown = assertThrows(RuntimeException.class, () -> Blockless.get(stage));
-      assertEquals("already failed", thrown.getCause().getMessage());
+      assertEquals("already failed", thrown.getMessage());
     }
 
     @Test
@@ -100,16 +99,16 @@ class BlocklessTest {
     }
 
     @Test
-    void wrapsUncheckedExceptionWithCausePreserved() {
+    void rethrowsUncheckedExceptionDirectly() {
       final var thrown =
           assertThrows(
-              RuntimeException.class,
+              IllegalStateException.class,
               () ->
                   Blockless.get(
                       () -> {
                         throw new IllegalStateException("broken");
                       }));
-      assertInstanceOf(IllegalStateException.class, thrown.getCause());
+      assertEquals("broken", thrown.getMessage());
     }
 
     @Test
@@ -126,15 +125,15 @@ class BlocklessTest {
     }
 
     @Test
-    void supplierPropagatesException() {
+    void supplierRethrowsUncheckedDirectly() {
       final var supplier =
           Blockless.supplier(
               () -> {
                 throw new IllegalArgumentException("bad");
               });
 
-      final var thrown = assertThrows(RuntimeException.class, supplier::get);
-      assertInstanceOf(IllegalArgumentException.class, thrown.getCause());
+      final var thrown = assertThrows(IllegalArgumentException.class, supplier::get);
+      assertEquals("bad", thrown.getMessage());
     }
   }
 }

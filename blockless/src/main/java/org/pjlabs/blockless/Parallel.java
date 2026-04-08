@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Semaphore;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -24,19 +25,32 @@ import java.util.function.Supplier;
 public final class Parallel {
 
   private final List<ContextPropagator> propagators;
+  private final Semaphore semaphore;
 
-  private Parallel(List<ContextPropagator> propagators) {
+  private Parallel(List<ContextPropagator> propagators, Semaphore semaphore) {
     this.propagators = List.copyOf(propagators);
+    this.semaphore = semaphore;
   }
 
-  /** Creates a {@link Parallel} instance with the given propagators. */
+  /** Creates an unbounded {@link Parallel} instance with the given propagators. */
   public static Parallel create(ContextPropagator... propagators) {
     return create(List.of(propagators));
   }
 
-  /** Creates a {@link Parallel} instance with the given propagators. */
+  /** Creates an unbounded {@link Parallel} instance with the given propagators. */
   public static Parallel create(List<ContextPropagator> propagators) {
-    return new Parallel(propagators);
+    return new Parallel(propagators, null);
+  }
+
+  /**
+   * Creates a {@link Parallel} instance that limits concurrent task execution to {@code
+   * maxConcurrency}. Tasks beyond the limit park on virtual threads until a permit is available.
+   */
+  public static Parallel create(int maxConcurrency, ContextPropagator... propagators) {
+    if (maxConcurrency < 1) {
+      throw new IllegalArgumentException("maxConcurrency must be at least 1");
+    }
+    return new Parallel(List.of(propagators), new Semaphore(maxConcurrency));
   }
 
   /**
@@ -45,7 +59,19 @@ public final class Parallel {
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
-    return Blockless.supplier(CallableContext.wrap(task::get, propagators));
+    final var effective = semaphore != null ? bounded(task) : task;
+    return Blockless.supplier(CallableContext.wrap(effective::get, propagators));
+  }
+
+  private <T> Supplier<T> bounded(Supplier<T> task) {
+    return () -> {
+      semaphore.acquireUninterruptibly();
+      try {
+        return task.get();
+      } finally {
+        semaphore.release();
+      }
+    };
   }
 
   /**

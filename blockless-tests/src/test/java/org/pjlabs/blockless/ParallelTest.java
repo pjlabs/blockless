@@ -1,12 +1,14 @@
 package org.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
 import org.slf4j.MDC;
@@ -142,5 +144,90 @@ class ParallelTest {
     assertTrue(
         result.values().stream().allMatch("trace-map"::equals),
         "all asMap tasks must see the propagated MDC value");
+  }
+
+  @Test
+  void mapHandlesEmptyList() {
+    assertEquals(List.of(), parallel.map(List.of(), i -> i));
+  }
+
+  @Test
+  void asMapHandlesEmptyKeys() {
+    assertEquals(0, parallel.asMap(List.of(), k -> k).size());
+  }
+
+  @Nested
+  class BoundedConcurrency {
+
+    @Test
+    void limitsConcurrentTasks() {
+      final var bounded = Parallel.create(2, new Slf4jMdcContextPropagator());
+      final var maxConcurrent = new AtomicInteger(0);
+      final var current = new AtomicInteger(0);
+
+      bounded.map(
+          List.of(1, 2, 3, 4, 5),
+          i -> {
+            final int c = current.incrementAndGet();
+            maxConcurrent.updateAndGet(max -> Math.max(max, c));
+            try {
+              Thread.sleep(50);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            current.decrementAndGet();
+            return i;
+          });
+
+      assertTrue(
+          maxConcurrent.get() <= 2, "expected max 2 concurrent, but was " + maxConcurrent.get());
+    }
+
+    @Test
+    void stillRunsConcurrently() {
+      final var bounded = Parallel.create(3, new Slf4jMdcContextPropagator());
+      final var maxConcurrent = new AtomicInteger(0);
+      final var current = new AtomicInteger(0);
+
+      bounded.map(
+          List.of(1, 2, 3, 4, 5),
+          i -> {
+            final int c = current.incrementAndGet();
+            maxConcurrent.updateAndGet(max -> Math.max(max, c));
+            try {
+              Thread.sleep(50);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            current.decrementAndGet();
+            return i;
+          });
+
+      assertTrue(
+          maxConcurrent.get() > 1,
+          "expected concurrent execution, but max concurrency was " + maxConcurrent.get());
+    }
+
+    @Test
+    void preservesResultOrder() {
+      final var bounded = Parallel.create(2, new Slf4jMdcContextPropagator());
+      final var results = bounded.map(List.of(3, 1, 2), i -> i * 10);
+      assertEquals(List.of(30, 10, 20), results);
+    }
+
+    @Test
+    void propagatesMdc() {
+      MDC.put("traceId", "bounded-trace");
+      final var bounded = Parallel.create(2, new Slf4jMdcContextPropagator());
+      final var results = bounded.map(List.of(1, 2, 3), i -> MDC.get("traceId"));
+      assertTrue(results.stream().allMatch("bounded-trace"::equals));
+    }
+
+    @Test
+    void rejectsZeroConcurrency() {
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> Parallel.create(0, new Slf4jMdcContextPropagator()));
+    }
   }
 }
