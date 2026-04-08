@@ -43,14 +43,14 @@ public final class Parallel {
   }
 
   /**
-   * Creates a {@link Parallel} instance that limits concurrent task execution to {@code
-   * maxConcurrency}. Tasks beyond the limit park on virtual threads until a permit is available.
+   * Returns a new {@link Parallel} with the same propagators but limited to {@code maxConcurrency}
+   * concurrent tasks. Tasks beyond the limit park on virtual threads until a permit is available.
    */
-  public static Parallel create(int maxConcurrency, ContextPropagator... propagators) {
+  public Parallel withMaxConcurrency(int maxConcurrency) {
     if (maxConcurrency < 1) {
       throw new IllegalArgumentException("maxConcurrency must be at least 1");
     }
-    return new Parallel(List.of(propagators), new Semaphore(maxConcurrency));
+    return new Parallel(propagators, new Semaphore(maxConcurrency));
   }
 
   /**

@@ -161,7 +161,7 @@ class ParallelTest {
 
     @Test
     void limitsConcurrentTasks() {
-      final var bounded = Parallel.create(2, new Slf4jMdcContextPropagator());
+      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
       final var maxConcurrent = new AtomicInteger(0);
       final var current = new AtomicInteger(0);
 
@@ -185,7 +185,7 @@ class ParallelTest {
 
     @Test
     void stillRunsConcurrently() {
-      final var bounded = Parallel.create(3, new Slf4jMdcContextPropagator());
+      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(3);
       final var maxConcurrent = new AtomicInteger(0);
       final var current = new AtomicInteger(0);
 
@@ -210,7 +210,7 @@ class ParallelTest {
 
     @Test
     void preservesResultOrder() {
-      final var bounded = Parallel.create(2, new Slf4jMdcContextPropagator());
+      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
       final var results = bounded.map(List.of(3, 1, 2), i -> i * 10);
       assertEquals(List.of(30, 10, 20), results);
     }
@@ -218,7 +218,7 @@ class ParallelTest {
     @Test
     void propagatesMdc() {
       MDC.put("traceId", "bounded-trace");
-      final var bounded = Parallel.create(2, new Slf4jMdcContextPropagator());
+      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
       final var results = bounded.map(List.of(1, 2, 3), i -> MDC.get("traceId"));
       assertTrue(results.stream().allMatch("bounded-trace"::equals));
     }
@@ -227,7 +227,7 @@ class ParallelTest {
     void rejectsZeroConcurrency() {
       assertThrows(
           IllegalArgumentException.class,
-          () -> Parallel.create(0, new Slf4jMdcContextPropagator()));
+          () -> Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(0));
     }
   }
 }
