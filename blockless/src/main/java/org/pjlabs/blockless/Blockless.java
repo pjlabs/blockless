@@ -56,7 +56,7 @@ public class Blockless {
         throwable.set(e);
       }
       if (throwable.get() != null) {
-        throw new RuntimeException(throwable.get());
+        throw wrapIfChecked(throwable.get());
       }
       return result.get();
     };
@@ -104,7 +104,7 @@ public class Blockless {
         throwable.set(e);
       }
       if (throwable.get() != null) {
-        throw new RuntimeException(throwable.get());
+        throw wrapIfChecked(throwable.get());
       }
       return result.get();
     };
@@ -120,5 +120,15 @@ public class Blockless {
    */
   public static <T> T get(Callable<T> callable) {
     return supplier(callable).get();
+  }
+
+  /**
+   * Rethrows RuntimeException subclasses directly; wraps checked exceptions in RuntimeException.
+   */
+  private static RuntimeException wrapIfChecked(Throwable t) {
+    if (t instanceof RuntimeException re) {
+      return re;
+    }
+    return new RuntimeException(t);
   }
 }

@@ -52,6 +52,9 @@ Supplier<String> data = parallel.async(() -> fetchData());
 
 // Build a map in parallel
 Map<String, Profile> profiles = parallel.asMap(userIds, id -> loadProfile(id));
+
+// Limit to 10 concurrent tasks (extras park on virtual threads until a permit frees up)
+var bounded = parallel.withMaxConcurrency(10);
 ```
 
 ## Context propagation
