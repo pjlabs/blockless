@@ -15,10 +15,6 @@
     <packaging>jar</packaging>
     <name>blockless-tests</name>
 
-    <properties>
-        <!-- Integration tests only: never publish this artifact. -->
-        <maven.deploy.skip>true</maven.deploy.skip>
-    </properties>
 
     <dependencies>
         <dependency>
