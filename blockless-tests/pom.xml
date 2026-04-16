@@ -16,7 +16,7 @@
     <name>blockless-tests</name>
 
     <properties>
-        <!-- Integration tests only: never publish this artifact (e.g. GitHub Packages). -->
+        <!-- Integration tests only: never publish this artifact. -->
         <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
 

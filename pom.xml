@@ -102,19 +102,6 @@
         </dependencies>
     </dependencyManagement>
 
-    <distributionManagement>
-        <repository>
-            <id>github</id>
-            <name>GitHub Packages</name>
-            <url>https://maven.pkg.github.com/pjlabs/blockless</url>
-        </repository>
-        <snapshotRepository>
-            <id>github</id>
-            <name>GitHub Packages</name>
-            <url>https://maven.pkg.github.com/pjlabs/blockless</url>
-        </snapshotRepository>
-    </distributionManagement>
-
     <build>
         <pluginManagement>
             <plugins>
@@ -180,8 +167,7 @@
     <profiles>
         <profile>
             <id>release</id>
-            <!-- Avoid deploy-plugin pushing to GitHub while only Central credentials are loaded;
-                 Central upload is central-publishing-maven-plugin on the deploy phase. -->
+            <!-- Skip default deploy-plugin upload; Central upload is central-publishing-maven-plugin. -->
             <properties>
                 <maven.deploy.skip>true</maven.deploy.skip>
             </properties>
