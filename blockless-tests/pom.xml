@@ -15,6 +15,28 @@
     <packaging>jar</packaging>
     <name>blockless-tests</name>
 
+    <properties>
+        <!-- Integration tests only: never publish this artifact (e.g. GitHub Packages). -->
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
+    <build>
+        <plugins>
+            <!-- Parent release profile enables central-publishing; disable only here so the
+                 publish goal does not run for this module (avoids publishing and extra resolution). -->
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>injected-central-publishing</id>
+                        <phase>none</phase>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
     <dependencies>
         <dependency>
             <groupId>org.pjlabs</groupId>
