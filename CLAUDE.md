@@ -5,7 +5,7 @@
 blockless is a Java 21+ library for virtual thread utilities with context propagation.
 Zero dependencies in core, framework-agnostic.
 
-Published to GitHub Packages: `io.github.pjlabs:blockless`
+Published to Maven Central: `io.github.pjlabs:blockless`
 
 ## Modules
 
