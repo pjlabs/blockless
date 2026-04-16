@@ -29,7 +29,8 @@ jobs:
         server-password: MAVEN_PASSWORD
         gpg-private-key: ${{ secrets.GPG_SIGNING_KEY }}
         gpg-passphrase: MAVEN_GPG_PASSPHRASE
-
+    - name: Set version
+      run: mvn versions:set -DnewVersion=${{ github.event.release.tag_name }}
     - name: Publish to Maven Central
       run: mvn -P release --batch-mode deploy
       env:
