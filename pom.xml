@@ -9,6 +9,35 @@
     <version>0.1.0-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>blockless parent</name>
+    <description>A library for virtual thread utilities with context propagation.</description>
+    <url>https://github.com/pjlabs/blockless</url>
+
+    <licenses>
+        <license>
+        <name>The Apache Software License, Version 2.0</name>
+        <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <name>Jimmy Wahlberg</name>
+            <email>jimmy.wahlberg+pjlabs@gmail.com</email>
+            <organization>PJ Labs</organization>
+            <organizationUrl>https://www.github.com/pjlabs</organizationUrl>
+        </developer>
+        <developer>
+            <name>Praveer Rai</name>
+            <organization>PJ Labs</organization>
+            <organizationUrl>https://www.github.com/pjlabs</organizationUrl>
+        </developer>
+    </developers>
+
+    <scm>
+        <connection>scm:git:git://github.com/pjlabs/blockless.git</connection>
+        <developerConnection>scm:git:git@github.com:pjlabs/blockless.git</developerConnection>
+        <url>http://github.com/pjlabs/blockless/tree/main</url>
+    </scm>
 
     <modules>
         <module>blockless</module>
@@ -123,4 +152,49 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>release</id>
+            <!-- Avoid deploy-plugin pushing to GitHub while only Central credentials are loaded;
+                 Central upload is central-publishing-maven-plugin on the deploy phase. -->
+            <properties>
+                <maven.deploy.skip>true</maven.deploy.skip>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.9.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <autoPublish>true</autoPublish>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                                <configuration>
+                                    <gpgArguments>
+                                        <arg>--pinentry-mode</arg>
+                                        <arg>loopback</arg>
+                                    </gpgArguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
