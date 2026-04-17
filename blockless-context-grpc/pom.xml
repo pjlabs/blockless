@@ -23,10 +23,12 @@
         <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-context</artifactId>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-api</artifactId>
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
