@@ -6,10 +6,16 @@
 
 <p align="center"><em>Tame your async — no platform threads were harmed.</em></p>
 
-A tiny Java 21 library that lets you wait for async results on virtual threads,
-so your platform threads stay free and your context tags along for the ride.
+A tiny Java 21 library for virtual thread concurrency. Two things:
 
-## Why
+1. **`Blockless.get()`** — wait for async results safely, without entering the future's internals
+2. **`Parallel`** — fan out work on virtual threads, collect results, keep your trace context
+
+So your platform threads stay free and your context tags along for the ride.
+
+Zero dependencies in core. Pluggable context propagation for MDC, gRPC, and OpenTelemetry.
+
+## Why `Blockless.get()`
 
 `CompletableFuture.join()` parks your thread inside the future's own internals.
 If that implementation uses `synchronized` or you're on a platform thread, you
@@ -27,19 +33,42 @@ String result = someFuture.join();
 String result = Blockless.get(someFuture);
 ```
 
-## Quick start
+Also works with callables — runs them on a virtual thread and blocks for the result:
 
 ```java
-// Wait for a CompletionStage without blocking platform threads
-var result = Blockless.get(CompletableFuture.supplyAsync(() -> "hello"));
-
-// Run a Callable on a virtual thread and get the result
 var answer = Blockless.get(() -> expensiveComputation());
 ```
 
-## Parallel execution
+## Why `Parallel`
 
-Run work concurrently on virtual threads with context propagation built in:
+Services often need to fan out N calls and collect the results. The typical
+pattern looks like this:
+
+```java
+// Before: manual executor + supplyAsync + semaphore + join
+var executor = Executors.newVirtualThreadPerTaskExecutor();
+var semaphore = new Semaphore(10);
+var futures = ids.stream()
+    .map(id -> CompletableFuture.supplyAsync(() -> {
+        semaphore.acquireUninterruptibly();
+        try { return fetchById(id); }
+        finally { semaphore.release(); }
+    }, executor))
+    .toList();
+var results = futures.stream().map(CompletableFuture::join).toList();
+```
+
+With blockless:
+
+```java
+// After: one line, same behavior
+var results = parallel.withMaxConcurrency(10).map(ids, this::fetchById);
+```
+
+Each task runs on its own virtual thread. Results stay in input order.
+MDC and trace context survive the hop.
+
+### Usage
 
 ```java
 var parallel = Parallel.create(new Slf4jMdcContextPropagator());
@@ -47,27 +76,43 @@ var parallel = Parallel.create(new Slf4jMdcContextPropagator());
 // Map in parallel, results stay in order
 List<String> names = parallel.map(userIds, id -> fetchName(id));
 
-// Fire off an async task
+// Fire off an async task, get result later
 Supplier<String> data = parallel.async(() -> fetchData());
 
 // Build a map in parallel
 Map<String, Profile> profiles = parallel.asMap(userIds, id -> loadProfile(id));
 
-// Limit to 10 concurrent tasks (extras park on virtual threads until a permit frees up)
+// Limit concurrent tasks (extras park until a permit frees up)
 var bounded = parallel.withMaxConcurrency(10);
+List<String> names = bounded.map(userIds, id -> fetchName(id));
+
+// Collect results without failing fast — failed tasks return Either.fail()
+List<Either<String, Throwable>> results = parallel.toEither(ids, id -> riskyFetch(id));
 ```
 
 ## Context propagation
 
-Thread-local context (MDC, gRPC context, OpenTelemetry spans) doesn't survive the
-hop to a new thread. Blockless fixes that.
+When you hop to a new thread, thread-local context (MDC trace IDs, gRPC context,
+OpenTelemetry spans) is lost. Logs become uncorrelated. Traces break.
+
+`Parallel` handles this automatically — context is captured when you call `map()`/`async()`
+and restored in each worker thread. You choose which propagators to wire up:
 
 ```java
-// Wrap a Callable — MDC comes along, get a result back
+var parallel = Parallel.create(
+    new Slf4jMdcContextPropagator(),
+    new GrpcContextPropagator()
+);
+```
+
+For lower-level use, you can wrap individual tasks:
+
+```java
+// Wrap a Callable — MDC comes along
 Callable<String> wrapped = CallableContext.wrap(task, new Slf4jMdcContextPropagator());
 
 // Wrap a Runnable
-Runnable wrappedRunnable = RunnableContext.wrap(task, new Slf4jMdcContextPropagator());
+Runnable wrapped = RunnableContext.wrap(task, new Slf4jMdcContextPropagator());
 
 // Wrap an entire ExecutorService
 ExecutorService executor = PropagatingExecutorService.wrap(
@@ -84,6 +129,9 @@ ExecutorService executor = PropagatingExecutorService.wrap(
 | `blockless-context-slf4j` | SLF4J MDC |
 | `blockless-context-grpc` | gRPC `Context` |
 | `blockless-context-opentelemetry` | OpenTelemetry `Context` |
+
+Framework dependencies are `provided` scope — blockless uses whatever version
+your service already has. No version conflicts.
 
 ## Modules
 
