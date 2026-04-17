@@ -15,6 +15,16 @@ So your platform threads stay free and your context tags along for the ride.
 
 Zero dependencies in core. Pluggable context propagation for MDC, gRPC, and OpenTelemetry.
 
+## Quick start
+
+```java
+// Wait for a CompletionStage without blocking platform threads
+var result = Blockless.get(CompletableFuture.supplyAsync(() -> "hello"));
+
+// Run a Callable on a virtual thread and get the result
+var answer = Blockless.get(() -> expensiveComputation());
+```
+
 ## Why `Blockless.get()`
 
 `CompletableFuture.join()` parks your thread inside the future's own internals.
