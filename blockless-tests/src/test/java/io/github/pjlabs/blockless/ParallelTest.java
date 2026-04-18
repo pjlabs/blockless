@@ -38,7 +38,7 @@ class ParallelTest {
             i -> {
               try {
                 Thread.sleep(i * 20L);
-              } catch (InterruptedException e) {
+              } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
               }
               return i * 10;
@@ -60,7 +60,7 @@ class ParallelTest {
           maxConcurrent.updateAndGet(max -> Math.max(max, c));
           try {
             Thread.sleep(50);
-          } catch (InterruptedException e) {
+          } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
           }
           current.decrementAndGet();
@@ -172,7 +172,7 @@ class ParallelTest {
             maxConcurrent.updateAndGet(max -> Math.max(max, c));
             try {
               Thread.sleep(50);
-            } catch (InterruptedException e) {
+            } catch (final InterruptedException e) {
               Thread.currentThread().interrupt();
             }
             current.decrementAndGet();
@@ -196,7 +196,7 @@ class ParallelTest {
             maxConcurrent.updateAndGet(max -> Math.max(max, c));
             try {
               Thread.sleep(50);
-            } catch (InterruptedException e) {
+            } catch (final InterruptedException e) {
               Thread.currentThread().interrupt();
             }
             current.decrementAndGet();
@@ -253,7 +253,7 @@ class ParallelTest {
           () -> {
             try {
               Thread.sleep(5000);
-            } catch (InterruptedException e) {
+            } catch (final InterruptedException e) {
               interrupted.incrementAndGet();
             }
             return "slow";
@@ -309,7 +309,7 @@ class ParallelTest {
     private void sleepQuietly(long millis) {
       try {
         Thread.sleep(millis);
-      } catch (InterruptedException e) {
+      } catch (final InterruptedException e) {
         Thread.currentThread().interrupt();
       }
     }
