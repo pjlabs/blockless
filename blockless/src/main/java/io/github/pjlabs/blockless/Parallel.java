@@ -74,35 +74,54 @@ public final class Parallel {
     };
   }
 
+  /** Creates an AsyncTask with thread handle for cancellation support. */
+  private <T> Blockless.AsyncTask<T> fork(Supplier<T> task) {
+    Objects.requireNonNull(task, "task");
+    final var effective = semaphore != null ? bounded(task) : task;
+    return Blockless.asyncTask(CallableContext.wrap(effective::get, propagators));
+  }
+
   /**
    * Applies {@code fn} to each element on virtual threads with context propagation, returning
-   * results in input order. Blocks until all tasks complete.
+   * results in input order. Blocks until all tasks complete. If any task fails, remaining tasks are
+   * interrupted.
    */
   public <T, R> List<R> map(List<T> items, Function<T, R> fn) {
     Objects.requireNonNull(items, "items");
     Objects.requireNonNull(fn, "fn");
 
-    final var suppliers = items.stream().map(item -> async(() -> fn.apply(item))).toList();
+    final var tasks = items.stream().map(item -> fork(() -> fn.apply(item))).toList();
 
-    return suppliers.stream().map(Supplier::get).toList();
+    try {
+      return tasks.stream().map(Blockless.AsyncTask::get).toList();
+    } catch (final RuntimeException e) {
+      tasks.forEach(Blockless.AsyncTask::interrupt);
+      throw e;
+    }
   }
 
   /**
    * Computes a value for each key on virtual threads with context propagation, returning a map
-   * preserving key iteration order. Blocks until all tasks complete.
+   * preserving key iteration order. Blocks until all tasks complete. If any task fails, remaining
+   * tasks are interrupted.
    */
   public <K, V> Map<K, V> asMap(Collection<K> keys, Function<K, V> valueMapper) {
     Objects.requireNonNull(keys, "keys");
     Objects.requireNonNull(valueMapper, "valueMapper");
 
     final var entries =
-        keys.stream().map(key -> Map.entry(key, async(() -> valueMapper.apply(key)))).toList();
+        keys.stream().map(key -> Map.entry(key, fork(() -> valueMapper.apply(key)))).toList();
 
-    final var result = new LinkedHashMap<K, V>();
-    for (var entry : entries) {
-      result.put(entry.getKey(), entry.getValue().get());
+    try {
+      final var result = new LinkedHashMap<K, V>();
+      for (final var entry : entries) {
+        result.put(entry.getKey(), entry.getValue().get());
+      }
+      return result;
+    } catch (final RuntimeException e) {
+      entries.forEach(entry -> entry.getValue().interrupt());
+      throw e;
     }
-    return result;
   }
 
   /**

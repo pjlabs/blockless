@@ -122,10 +122,54 @@ public class Blockless {
     return supplier(callable).get();
   }
 
+  /** A task handle that exposes both the result supplier and the underlying virtual thread. */
+  record AsyncTask<T>(Supplier<T> supplier, Thread thread) {
+
+    T get() {
+      return supplier.get();
+    }
+
+    void interrupt() {
+      thread.interrupt();
+    }
+  }
+
+  /** Like {@link #supplier(Callable)} but returns the thread handle for cancellation. */
+  static <T> AsyncTask<T> asyncTask(Callable<T> callable) {
+    final var result = new AtomicReference<T>();
+    final var throwable = new AtomicReference<Throwable>();
+    final var thread =
+        Thread.startVirtualThread(
+            () -> {
+              try {
+                result.set(callable.call());
+              } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throwable.set(e);
+              } catch (Exception e) {
+                throwable.set(e);
+              }
+            });
+    final Supplier<T> supplier =
+        () -> {
+          try {
+            thread.join();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throwable.set(e);
+          }
+          if (throwable.get() != null) {
+            throw wrapIfChecked(throwable.get());
+          }
+          return result.get();
+        };
+    return new AsyncTask<>(supplier, thread);
+  }
+
   /**
    * Rethrows RuntimeException subclasses directly; wraps checked exceptions in RuntimeException.
    */
-  private static RuntimeException wrapIfChecked(Throwable t) {
+  static RuntimeException wrapIfChecked(Throwable t) {
     if (t instanceof RuntimeException re) {
       return re;
     }

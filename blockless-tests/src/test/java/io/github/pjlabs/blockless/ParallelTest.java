@@ -230,4 +230,91 @@ class ParallelTest {
           () -> Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(0));
     }
   }
+
+  @Nested
+  class CancelOnFailure {
+
+    @Test
+    void mapInterruptsRemainingTasksOnFailure() {
+      final var interrupted = new AtomicInteger(0);
+
+      assertThrows(
+          RuntimeException.class,
+          () ->
+              parallel.map(
+                  List.of(1, 2, 3),
+                  i -> {
+                    if (i == 1) {
+                      throw new RuntimeException("fail fast");
+                    }
+                    try {
+                      Thread.sleep(5000);
+                    } catch (InterruptedException e) {
+                      interrupted.incrementAndGet();
+                    }
+                    return i;
+                  }));
+
+      // Give interrupts a moment to propagate
+      try {
+        Thread.sleep(100);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      assertTrue(
+          interrupted.get() > 0, "remaining tasks should have been interrupted, but none were");
+    }
+
+    @Test
+    void asMapInterruptsRemainingTasksOnFailure() {
+      final var interrupted = new AtomicInteger(0);
+
+      assertThrows(
+          RuntimeException.class,
+          () ->
+              parallel.asMap(
+                  List.of("a", "b", "c"),
+                  key -> {
+                    if ("a".equals(key)) {
+                      throw new RuntimeException("fail fast");
+                    }
+                    try {
+                      Thread.sleep(5000);
+                    } catch (InterruptedException e) {
+                      interrupted.incrementAndGet();
+                    }
+                    return key.toUpperCase();
+                  }));
+
+      try {
+        Thread.sleep(100);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+      assertTrue(
+          interrupted.get() > 0, "remaining tasks should have been interrupted, but none were");
+    }
+
+    @Test
+    void toEitherDoesNotInterruptOnFailure() {
+      final var completed = new AtomicInteger(0);
+
+      parallel.toEither(
+          List.of(1, 2, 3),
+          i -> {
+            if (i == 1) {
+              throw new RuntimeException("fail");
+            }
+            try {
+              Thread.sleep(50);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            completed.incrementAndGet();
+            return i;
+          });
+
+      assertEquals(2, completed.get(), "toEither should let all tasks run to completion");
+    }
+  }
 }
