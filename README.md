@@ -76,7 +76,8 @@ var results = parallel.withMaxConcurrency(10).map(ids, this::fetchById);
 ```
 
 Each task runs on its own virtual thread. Results stay in input order.
-MDC and trace context survive the hop.
+MDC and trace context survive the hop. If any task fails, remaining tasks
+are interrupted — no wasted work running in the background.
 
 ### Usage
 
