@@ -38,7 +38,7 @@ class ParallelTest {
             i -> {
               try {
                 Thread.sleep(i * 20L);
-              } catch (InterruptedException e) {
+              } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
               }
               return i * 10;
@@ -60,7 +60,7 @@ class ParallelTest {
           maxConcurrent.updateAndGet(max -> Math.max(max, c));
           try {
             Thread.sleep(50);
-          } catch (InterruptedException e) {
+          } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
           }
           current.decrementAndGet();
@@ -172,7 +172,7 @@ class ParallelTest {
             maxConcurrent.updateAndGet(max -> Math.max(max, c));
             try {
               Thread.sleep(50);
-            } catch (InterruptedException e) {
+            } catch (final InterruptedException e) {
               Thread.currentThread().interrupt();
             }
             current.decrementAndGet();
@@ -196,7 +196,7 @@ class ParallelTest {
             maxConcurrent.updateAndGet(max -> Math.max(max, c));
             try {
               Thread.sleep(50);
-            } catch (InterruptedException e) {
+            } catch (final InterruptedException e) {
               Thread.currentThread().interrupt();
             }
             current.decrementAndGet();
@@ -249,7 +249,7 @@ class ParallelTest {
                     }
                     try {
                       Thread.sleep(5000);
-                    } catch (InterruptedException e) {
+                    } catch (final InterruptedException e) {
                       interrupted.incrementAndGet();
                     }
                     return i;
@@ -258,7 +258,7 @@ class ParallelTest {
       // Give interrupts a moment to propagate
       try {
         Thread.sleep(100);
-      } catch (InterruptedException e) {
+      } catch (final InterruptedException e) {
         Thread.currentThread().interrupt();
       }
       assertTrue(
@@ -280,7 +280,7 @@ class ParallelTest {
                     }
                     try {
                       Thread.sleep(5000);
-                    } catch (InterruptedException e) {
+                    } catch (final InterruptedException e) {
                       interrupted.incrementAndGet();
                     }
                     return key.toUpperCase();
@@ -288,7 +288,7 @@ class ParallelTest {
 
       try {
         Thread.sleep(100);
-      } catch (InterruptedException e) {
+      } catch (final InterruptedException e) {
         Thread.currentThread().interrupt();
       }
       assertTrue(
@@ -307,7 +307,7 @@ class ParallelTest {
             }
             try {
               Thread.sleep(50);
-            } catch (InterruptedException e) {
+            } catch (final InterruptedException e) {
               Thread.currentThread().interrupt();
             }
             completed.incrementAndGet();

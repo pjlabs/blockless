@@ -43,7 +43,7 @@ public class Blockless {
             () -> {
               try {
                 latch.await();
-              } catch (InterruptedException e) {
+              } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throwable.set(e);
               }
@@ -51,7 +51,7 @@ public class Blockless {
     return () -> {
       try {
         thread.join();
-      } catch (InterruptedException e) {
+      } catch (final InterruptedException e) {
         Thread.currentThread().interrupt();
         throwable.set(e);
       }
@@ -89,17 +89,17 @@ public class Blockless {
             () -> {
               try {
                 result.set(callable.call());
-              } catch (InterruptedException e) {
+              } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throwable.set(e);
-              } catch (Exception e) {
+              } catch (final Exception e) {
                 throwable.set(e);
               }
             });
     return () -> {
       try {
         thread.join();
-      } catch (InterruptedException e) {
+      } catch (final InterruptedException e) {
         Thread.currentThread().interrupt();
         throwable.set(e);
       }
@@ -143,10 +143,10 @@ public class Blockless {
             () -> {
               try {
                 result.set(callable.call());
-              } catch (InterruptedException e) {
+              } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throwable.set(e);
-              } catch (Exception e) {
+              } catch (final Exception e) {
                 throwable.set(e);
               }
             });
@@ -154,7 +154,7 @@ public class Blockless {
         () -> {
           try {
             thread.join();
-          } catch (InterruptedException e) {
+          } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             throwable.set(e);
           }
