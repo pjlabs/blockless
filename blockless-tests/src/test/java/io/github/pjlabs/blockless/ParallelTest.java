@@ -230,4 +230,75 @@ class ParallelTest {
           () -> Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(0));
     }
   }
+
+  @Nested
+  class Timeout {
+
+    @Test
+    void completesWithinTimeout() {
+      final var timed =
+          Parallel.create(new Slf4jMdcContextPropagator())
+              .withTimeout(java.time.Duration.ofSeconds(5));
+      final var results = timed.map(List.of(1, 2, 3), i -> i * 10);
+      assertEquals(List.of(10, 20, 30), results);
+    }
+
+    @Test
+    void interruptsSlowTask() {
+      final var timed =
+          Parallel.create(new Slf4jMdcContextPropagator())
+              .withTimeout(java.time.Duration.ofMillis(50));
+      assertThrows(
+          RuntimeException.class,
+          () ->
+              timed.map(
+                  List.of(1),
+                  i -> {
+                    try {
+                      Thread.sleep(5000);
+                    } catch (InterruptedException e) {
+                      Thread.currentThread().interrupt();
+                      throw new RuntimeException(e);
+                    }
+                    return i;
+                  }));
+    }
+
+    @Test
+    void fastTasksUnaffected() {
+      final var timed =
+          Parallel.create(new Slf4jMdcContextPropagator())
+              .withTimeout(java.time.Duration.ofSeconds(1));
+      final var result = timed.map(List.of("a", "b"), s -> s.toUpperCase());
+      assertEquals(List.of("A", "B"), result);
+    }
+
+    @Test
+    void combinesWithMaxConcurrency() {
+      final var timed =
+          Parallel.create(new Slf4jMdcContextPropagator())
+              .withMaxConcurrency(2)
+              .withTimeout(java.time.Duration.ofSeconds(5));
+      final var results = timed.map(List.of(1, 2, 3, 4), i -> i * 10);
+      assertEquals(List.of(10, 20, 30, 40), results);
+    }
+
+    @Test
+    void rejectsZeroTimeout() {
+      assertThrows(
+          IllegalArgumentException.class,
+          () ->
+              Parallel.create(new Slf4jMdcContextPropagator())
+                  .withTimeout(java.time.Duration.ZERO));
+    }
+
+    @Test
+    void rejectsNegativeTimeout() {
+      assertThrows(
+          IllegalArgumentException.class,
+          () ->
+              Parallel.create(new Slf4jMdcContextPropagator())
+                  .withTimeout(java.time.Duration.ofMillis(-1)));
+    }
+  }
 }
