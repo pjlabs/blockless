@@ -98,6 +98,9 @@ List<String> names = bounded.map(userIds, id -> fetchName(id));
 
 // Collect results without failing fast — failed tasks return Either.fail()
 List<Either<String, Throwable>> results = parallel.toEither(ids, id -> riskyFetch(id));
+
+// Race — first successful result wins, remaining tasks are interrupted
+var result = parallel.race(() -> fetchFromPrimary(), () -> fetchFromReplica());
 ```
 
 ## Context propagation
