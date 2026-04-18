@@ -230,4 +230,88 @@ class ParallelTest {
           () -> Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(0));
     }
   }
+
+  @Nested
+  class Race {
+
+    @Test
+    void returnsFirstSuccessfulResult() {
+      final var result =
+          parallel.race(
+              () -> {
+                sleepQuietly(200);
+                return "slow";
+              },
+              () -> "fast");
+      assertEquals("fast", result);
+    }
+
+    @Test
+    void interruptsRemainingTasks() {
+      final var interrupted = new AtomicInteger(0);
+      parallel.race(
+          () -> {
+            try {
+              Thread.sleep(5000);
+            } catch (InterruptedException e) {
+              interrupted.incrementAndGet();
+            }
+            return "slow";
+          },
+          () -> "fast");
+
+      sleepQuietly(50);
+      assertEquals(1, interrupted.get(), "slow task should have been interrupted");
+    }
+
+    @Test
+    void throwsWhenAllFail() {
+      assertThrows(
+          IllegalStateException.class,
+          () ->
+              parallel.race(
+                  List.of(
+                      () -> {
+                        throw new IllegalStateException("fail1");
+                      },
+                      () -> {
+                        throw new IllegalStateException("fail2");
+                      })));
+    }
+
+    @Test
+    void propagatesMdc() {
+      MDC.put("traceId", "race-trace");
+      final var result = parallel.race(() -> MDC.get("traceId"), () -> MDC.get("traceId"));
+      assertEquals("race-trace", result);
+    }
+
+    @Test
+    void rejectsEmptyList() {
+      assertThrows(IllegalArgumentException.class, () -> parallel.race(List.of()));
+    }
+
+    @Test
+    void succeedsEvenIfSomeFail() {
+      final var result =
+          parallel.race(
+              List.of(
+                  () -> {
+                    throw new RuntimeException("fail");
+                  },
+                  () -> {
+                    sleepQuietly(50);
+                    return "success";
+                  }));
+      assertEquals("success", result);
+    }
+
+    private void sleepQuietly(long millis) {
+      try {
+        Thread.sleep(millis);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+  }
 }

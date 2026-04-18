@@ -7,7 +7,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -72,6 +74,81 @@ public final class Parallel {
         semaphore.release();
       }
     };
+  }
+
+  /**
+   * Runs all suppliers concurrently on virtual threads with context propagation. Returns the result
+   * of the first supplier to complete successfully. Remaining tasks are interrupted.
+   *
+   * <p>If all suppliers fail, the exception from the last completed task is thrown.
+   *
+   * @throws IllegalArgumentException if tasks is empty
+   */
+  @SafeVarargs
+  public final <T> T race(Supplier<T>... tasks) {
+    return race(List.of(tasks));
+  }
+
+  /**
+   * Runs all suppliers concurrently on virtual threads with context propagation. Returns the result
+   * of the first supplier to complete successfully. Remaining tasks are interrupted.
+   *
+   * <p>If all suppliers fail, the exception from the last completed task is thrown.
+   *
+   * @throws IllegalArgumentException if tasks is empty
+   */
+  public <T> T race(List<Supplier<T>> tasks) {
+    Objects.requireNonNull(tasks, "tasks");
+    if (tasks.isEmpty()) {
+      throw new IllegalArgumentException("tasks must not be empty");
+    }
+
+    final var result = new AtomicReference<T>();
+    final var lastFailure = new AtomicReference<Throwable>();
+    final var success = new CountDownLatch(1);
+    final var remaining = new CountDownLatch(tasks.size());
+    final var threads = new ArrayList<Thread>(tasks.size());
+
+    for (final var task : tasks) {
+      final var wrapped =
+          CallableContext.wrap((semaphore != null ? bounded(task) : task)::get, propagators);
+      final var thread =
+          Thread.startVirtualThread(
+              () -> {
+                try {
+                  result.set(wrapped.call());
+                  success.countDown();
+                } catch (final Exception e) {
+                  lastFailure.set(e);
+                } finally {
+                  remaining.countDown();
+                }
+              });
+      threads.add(thread);
+    }
+
+    try {
+      // Wait until one succeeds or all finish
+      while (success.getCount() > 0 && remaining.getCount() > 0) {
+        remaining.await(1, java.util.concurrent.TimeUnit.MILLISECONDS);
+      }
+    } catch (final InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
+    } finally {
+      for (final var thread : threads) {
+        thread.interrupt();
+      }
+    }
+
+    if (success.getCount() == 0) {
+      return result.get();
+    }
+
+    final var failure = lastFailure.get();
+    throw failure != null
+        ? Blockless.wrapIfChecked(failure)
+        : new RuntimeException("All tasks failed");
   }
 
   /**

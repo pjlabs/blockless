@@ -125,7 +125,7 @@ public class Blockless {
   /**
    * Rethrows RuntimeException subclasses directly; wraps checked exceptions in RuntimeException.
    */
-  private static RuntimeException wrapIfChecked(Throwable t) {
+  static RuntimeException wrapIfChecked(Throwable t) {
     if (t instanceof RuntimeException re) {
       return re;
     }
