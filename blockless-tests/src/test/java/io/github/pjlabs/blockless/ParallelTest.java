@@ -162,11 +162,12 @@ class ParallelTest {
 
     @Test
     void limitsConcurrentTasks() {
-      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
       final var maxConcurrent = new AtomicInteger(0);
       final var current = new AtomicInteger(0);
 
-      bounded.map(
+      boundedParallel.map(
           List.of(1, 2, 3, 4, 5),
           i -> {
             final int c = current.incrementAndGet();
@@ -186,11 +187,12 @@ class ParallelTest {
 
     @Test
     void stillRunsConcurrently() {
-      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(3);
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(3);
       final var maxConcurrent = new AtomicInteger(0);
       final var current = new AtomicInteger(0);
 
-      bounded.map(
+      boundedParallel.map(
           List.of(1, 2, 3, 4, 5),
           i -> {
             final int c = current.incrementAndGet();
@@ -211,16 +213,18 @@ class ParallelTest {
 
     @Test
     void preservesResultOrder() {
-      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
-      final var results = bounded.map(List.of(3, 1, 2), i -> i * 10);
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
+      final var results = boundedParallel.map(List.of(3, 1, 2), i -> i * 10);
       assertEquals(List.of(30, 10, 20), results);
     }
 
     @Test
     void propagatesMdc() {
       MDC.put("traceId", "bounded-trace");
-      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
-      final var results = bounded.map(List.of(1, 2, 3), i -> MDC.get("traceId"));
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
+      final var results = boundedParallel.map(List.of(1, 2, 3), i -> MDC.get("traceId"));
       assertTrue(results.stream().allMatch("bounded-trace"::equals));
     }
 
@@ -237,20 +241,20 @@ class ParallelTest {
 
     @Test
     void completesWithinTimeout() {
-      final var timed =
+      final var timedParallel =
           Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofSeconds(5));
-      final var results = timed.map(List.of(1, 2, 3), i -> i * 10);
+      final var results = timedParallel.map(List.of(1, 2, 3), i -> i * 10);
       assertEquals(List.of(10, 20, 30), results);
     }
 
     @Test
     void interruptsSlowTask() {
-      final var timed =
+      final var timedParallel =
           Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(50));
       assertThrows(
           RuntimeException.class,
           () ->
-              timed.map(
+              timedParallel.map(
                   List.of(1),
                   i -> {
                     try {
@@ -265,19 +269,19 @@ class ParallelTest {
 
     @Test
     void fastTasksUnaffected() {
-      final var timed =
+      final var timedParallel =
           Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofSeconds(1));
-      final var result = timed.map(List.of("a", "b"), s -> s.toUpperCase());
+      final var result = timedParallel.map(List.of("a", "b"), s -> s.toUpperCase());
       assertEquals(List.of("A", "B"), result);
     }
 
     @Test
     void combinesWithMaxConcurrency() {
-      final var timed =
+      final var timedParallel =
           Parallel.create(new Slf4jMdcContextPropagator())
               .withMaxConcurrency(2)
               .withTimeout(Duration.ofSeconds(5));
-      final var results = timed.map(List.of(1, 2, 3, 4), i -> i * 10);
+      final var results = timedParallel.map(List.of(1, 2, 3, 4), i -> i * 10);
       assertEquals(List.of(10, 20, 30, 40), results);
     }
 
