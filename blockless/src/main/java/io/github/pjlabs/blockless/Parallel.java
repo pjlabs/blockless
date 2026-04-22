@@ -76,14 +76,14 @@ public final class Parallel {
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
-    var effective = semaphore != null ? bounded(task) : task;
+    var wrappedSupplier = semaphore != null ? boundedSupplier(task) : task;
     if (timeout != null) {
-      effective = timed(effective);
+      wrappedSupplier = timedSupplier(wrappedSupplier);
     }
-    return Blockless.supplier(CallableContext.wrap(effective::get, propagators));
+    return Blockless.supplier(CallableContext.wrap(wrappedSupplier::get, propagators));
   }
 
-  private <T> Supplier<T> timed(Supplier<T> task) {
+  private <T> Supplier<T> timedSupplier(Supplier<T> task) {
     return () -> {
       final var taskThread = Thread.currentThread();
       final var timer =
@@ -104,7 +104,7 @@ public final class Parallel {
     };
   }
 
-  private <T> Supplier<T> bounded(Supplier<T> task) {
+  private <T> Supplier<T> boundedSupplier(Supplier<T> task) {
     return () -> {
       semaphore.acquireUninterruptibly();
       try {
