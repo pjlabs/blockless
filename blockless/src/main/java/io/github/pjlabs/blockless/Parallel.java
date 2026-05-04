@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -86,12 +87,15 @@ public final class Parallel {
   private <T> Supplier<T> timedSupplier(Supplier<T> task) {
     return () -> {
       final var taskThread = Thread.currentThread();
+      final var done = new AtomicBoolean(false);
       final var timer =
           Thread.startVirtualThread(
               () -> {
                 try {
                   Thread.sleep(timeout);
-                  taskThread.interrupt();
+                  if (!done.get()) {
+                    taskThread.interrupt();
+                  }
                 } catch (InterruptedException ignored) {
                   // Timer cancelled — task completed in time
                 }
@@ -99,6 +103,7 @@ public final class Parallel {
       try {
         return task.get();
       } finally {
+        done.set(true);
         timer.interrupt();
       }
     };
