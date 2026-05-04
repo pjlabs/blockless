@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -38,7 +39,7 @@ class ParallelTest {
             i -> {
               try {
                 Thread.sleep(i * 20L);
-              } catch (InterruptedException e) {
+              } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
               }
               return i * 10;
@@ -60,7 +61,7 @@ class ParallelTest {
           maxConcurrent.updateAndGet(max -> Math.max(max, c));
           try {
             Thread.sleep(50);
-          } catch (InterruptedException e) {
+          } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
           }
           current.decrementAndGet();
@@ -161,18 +162,19 @@ class ParallelTest {
 
     @Test
     void limitsConcurrentTasks() {
-      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
       final var maxConcurrent = new AtomicInteger(0);
       final var current = new AtomicInteger(0);
 
-      bounded.map(
+      boundedParallel.map(
           List.of(1, 2, 3, 4, 5),
           i -> {
             final int c = current.incrementAndGet();
             maxConcurrent.updateAndGet(max -> Math.max(max, c));
             try {
               Thread.sleep(50);
-            } catch (InterruptedException e) {
+            } catch (final InterruptedException e) {
               Thread.currentThread().interrupt();
             }
             current.decrementAndGet();
@@ -185,18 +187,19 @@ class ParallelTest {
 
     @Test
     void stillRunsConcurrently() {
-      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(3);
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(3);
       final var maxConcurrent = new AtomicInteger(0);
       final var current = new AtomicInteger(0);
 
-      bounded.map(
+      boundedParallel.map(
           List.of(1, 2, 3, 4, 5),
           i -> {
             final int c = current.incrementAndGet();
             maxConcurrent.updateAndGet(max -> Math.max(max, c));
             try {
               Thread.sleep(50);
-            } catch (InterruptedException e) {
+            } catch (final InterruptedException e) {
               Thread.currentThread().interrupt();
             }
             current.decrementAndGet();
@@ -210,16 +213,18 @@ class ParallelTest {
 
     @Test
     void preservesResultOrder() {
-      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
-      final var results = bounded.map(List.of(3, 1, 2), i -> i * 10);
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
+      final var results = boundedParallel.map(List.of(3, 1, 2), i -> i * 10);
       assertEquals(List.of(30, 10, 20), results);
     }
 
     @Test
     void propagatesMdc() {
       MDC.put("traceId", "bounded-trace");
-      final var bounded = Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
-      final var results = bounded.map(List.of(1, 2, 3), i -> MDC.get("traceId"));
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
+      final var results = boundedParallel.map(List.of(1, 2, 3), i -> MDC.get("traceId"));
       assertTrue(results.stream().allMatch("bounded-trace"::equals));
     }
 
@@ -228,6 +233,71 @@ class ParallelTest {
       assertThrows(
           IllegalArgumentException.class,
           () -> Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(0));
+    }
+  }
+
+  @Nested
+  class Timeout {
+
+    @Test
+    void completesWithinTimeout() {
+      final var timedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofSeconds(5));
+      final var results = timedParallel.map(List.of(1, 2, 3), i -> i * 10);
+      assertEquals(List.of(10, 20, 30), results);
+    }
+
+    @Test
+    void interruptsSlowTask() {
+      final var timedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(50));
+      assertThrows(
+          RuntimeException.class,
+          () ->
+              timedParallel.map(
+                  List.of(1),
+                  i -> {
+                    try {
+                      Thread.sleep(5000);
+                    } catch (final InterruptedException e) {
+                      Thread.currentThread().interrupt();
+                      throw new RuntimeException(e);
+                    }
+                    return i;
+                  }));
+    }
+
+    @Test
+    void fastTasksUnaffected() {
+      final var timedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofSeconds(1));
+      final var result = timedParallel.map(List.of("a", "b"), s -> s.toUpperCase());
+      assertEquals(List.of("A", "B"), result);
+    }
+
+    @Test
+    void combinesWithMaxConcurrency() {
+      final var timedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator())
+              .withMaxConcurrency(2)
+              .withTimeout(Duration.ofSeconds(5));
+      final var results = timedParallel.map(List.of(1, 2, 3, 4), i -> i * 10);
+      assertEquals(List.of(10, 20, 30, 40), results);
+    }
+
+    @Test
+    void rejectsZeroTimeout() {
+      assertThrows(
+          IllegalArgumentException.class,
+          () -> Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ZERO));
+    }
+
+    @Test
+    void rejectsNegativeTimeout() {
+      assertThrows(
+          IllegalArgumentException.class,
+          () ->
+              Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(-1)));
     }
   }
 }

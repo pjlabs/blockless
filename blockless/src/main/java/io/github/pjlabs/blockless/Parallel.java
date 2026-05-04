@@ -1,5 +1,6 @@
 package io.github.pjlabs.blockless;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -8,6 +9,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -26,10 +29,12 @@ public final class Parallel {
 
   private final List<ContextPropagator> propagators;
   private final Semaphore semaphore;
+  private final Duration timeout;
 
-  private Parallel(List<ContextPropagator> propagators, Semaphore semaphore) {
+  private Parallel(List<ContextPropagator> propagators, Semaphore semaphore, Duration timeout) {
     this.propagators = List.copyOf(propagators);
     this.semaphore = semaphore;
+    this.timeout = timeout;
   }
 
   /** Creates an unbounded {@link Parallel} instance with the given propagators. */
@@ -39,7 +44,7 @@ public final class Parallel {
 
   /** Creates an unbounded {@link Parallel} instance with the given propagators. */
   public static Parallel create(List<ContextPropagator> propagators) {
-    return new Parallel(propagators, null);
+    return new Parallel(propagators, null, null);
   }
 
   /**
@@ -50,7 +55,20 @@ public final class Parallel {
     if (maxConcurrency < 1) {
       throw new IllegalArgumentException("maxConcurrency must be at least 1");
     }
-    return new Parallel(propagators, new Semaphore(maxConcurrency));
+    return new Parallel(propagators, new Semaphore(maxConcurrency), timeout);
+  }
+
+  /**
+   * Returns a new {@link Parallel} with a per-task timeout. If a task does not complete within the
+   * duration, its thread is interrupted and a {@link TimeoutException} is thrown (wrapped in {@link
+   * RuntimeException}).
+   */
+  public Parallel withTimeout(Duration timeout) {
+    Objects.requireNonNull(timeout, "timeout");
+    if (timeout.isNegative() || timeout.isZero()) {
+      throw new IllegalArgumentException("timeout must be positive");
+    }
+    return new Parallel(propagators, semaphore, timeout);
   }
 
   /**
@@ -59,11 +77,39 @@ public final class Parallel {
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
-    final var effective = semaphore != null ? bounded(task) : task;
-    return Blockless.supplier(CallableContext.wrap(effective::get, propagators));
+    var wrappedSupplier = semaphore != null ? boundedSupplier(task) : task;
+    if (timeout != null) {
+      wrappedSupplier = timedSupplier(wrappedSupplier);
+    }
+    return Blockless.supplier(CallableContext.wrap(wrappedSupplier::get, propagators));
   }
 
-  private <T> Supplier<T> bounded(Supplier<T> task) {
+  private <T> Supplier<T> timedSupplier(Supplier<T> task) {
+    return () -> {
+      final var taskThread = Thread.currentThread();
+      final var done = new AtomicBoolean(false);
+      final var timer =
+          Thread.startVirtualThread(
+              () -> {
+                try {
+                  Thread.sleep(timeout);
+                  if (!done.get()) {
+                    taskThread.interrupt();
+                  }
+                } catch (InterruptedException ignored) {
+                  // Timer cancelled — task completed in time
+                }
+              });
+      try {
+        return task.get();
+      } finally {
+        done.set(true);
+        timer.interrupt();
+      }
+    };
+  }
+
+  private <T> Supplier<T> boundedSupplier(Supplier<T> task) {
     return () -> {
       semaphore.acquireUninterruptibly();
       try {

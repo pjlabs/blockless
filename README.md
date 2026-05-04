@@ -93,8 +93,15 @@ Supplier<String> data = parallel.async(() -> fetchData());
 Map<String, Profile> profiles = parallel.asMap(userIds, id -> loadProfile(id));
 
 // Limit concurrent tasks (extras park until a permit frees up)
-var bounded = parallel.withMaxConcurrency(10);
-List<String> names = bounded.map(userIds, id -> fetchName(id));
+var boundedParallel = parallel.withMaxConcurrency(10);
+List<String> names = boundedParallel.map(userIds, id -> fetchName(id));
+
+// Per-task timeout — thread is interrupted if task exceeds the deadline
+var timedParallel = parallel.withTimeout(Duration.ofSeconds(5));
+List<String> names = timedParallel.map(userIds, id -> fetchName(id));
+
+// Combines with withMaxConcurrency
+var safeParallel = parallel.withMaxConcurrency(10).withTimeout(Duration.ofSeconds(5));
 
 // Collect results without failing fast — failed tasks return Either.fail()
 List<Either<String, Throwable>> results = parallel.toEither(ids, id -> riskyFetch(id));
