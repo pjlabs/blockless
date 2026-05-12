@@ -43,6 +43,8 @@ String result = someFuture.join();
 String result = Blockless.get(someFuture);
 ```
 
+**Defensive coding:** `Blockless.get()` is safe whether your calling thread is a virtual thread or a platform thread. If a refactor, config change, or library upgrade silently changes what thread your code runs on, `.join()` could start blocking platform threads with no warning. `Blockless.get()` stays safe regardless — you don't have to know or care what thread you're on.
+
 Also works with callables — runs them on a virtual thread and blocks for the result:
 
 ```java
