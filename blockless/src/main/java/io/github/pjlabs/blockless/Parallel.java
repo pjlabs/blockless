@@ -1,6 +1,7 @@
 package io.github.pjlabs.blockless;
 
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -8,9 +9,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -20,6 +23,10 @@ import java.util.function.Supplier;
  * <p>Each task runs on its own virtual thread via {@link Thread#startVirtualThread}, with context
  * captured at call time and propagated using the configured {@link ContextPropagator} instances.
  *
+ * <p>When {@link #withMaxConcurrency(int)} is set, {@link #map} and {@link #toEither} use a sliding
+ * window — at most N virtual threads are alive at any time. Without it, all tasks are launched
+ * eagerly.
+ *
  * <pre>{@code
  * var parallel = Parallel.create(new Slf4jMdcContextPropagator());
  * List<String> results = parallel.map(ids, id -> fetchName(id));
@@ -28,12 +35,12 @@ import java.util.function.Supplier;
 public final class Parallel {
 
   private final List<ContextPropagator> propagators;
-  private final Semaphore semaphore;
+  private final int maxConcurrency;
   private final Duration timeout;
 
-  private Parallel(List<ContextPropagator> propagators, Semaphore semaphore, Duration timeout) {
+  private Parallel(List<ContextPropagator> propagators, int maxConcurrency, Duration timeout) {
     this.propagators = List.copyOf(propagators);
-    this.semaphore = semaphore;
+    this.maxConcurrency = maxConcurrency;
     this.timeout = timeout;
   }
 
@@ -44,18 +51,19 @@ public final class Parallel {
 
   /** Creates an unbounded {@link Parallel} instance with the given propagators. */
   public static Parallel create(List<ContextPropagator> propagators) {
-    return new Parallel(propagators, null, null);
+    return new Parallel(propagators, 0, null);
   }
 
   /**
    * Returns a new {@link Parallel} with the same propagators but limited to {@code maxConcurrency}
-   * concurrent tasks. Tasks beyond the limit park on virtual threads until a permit is available.
+   * concurrent tasks. In {@link #map} and {@link #toEither}, this controls the sliding window size
+   * — at most N virtual threads are alive at any time.
    */
   public Parallel withMaxConcurrency(int maxConcurrency) {
     if (maxConcurrency < 1) {
       throw new IllegalArgumentException("maxConcurrency must be at least 1");
     }
-    return new Parallel(propagators, new Semaphore(maxConcurrency), timeout);
+    return new Parallel(propagators, maxConcurrency, timeout);
   }
 
   /**
@@ -68,7 +76,7 @@ public final class Parallel {
     if (timeout.isNegative() || timeout.isZero()) {
       throw new IllegalArgumentException("timeout must be positive");
     }
-    return new Parallel(propagators, semaphore, timeout);
+    return new Parallel(propagators, maxConcurrency, timeout);
   }
 
   /**
@@ -77,11 +85,192 @@ public final class Parallel {
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
-    var wrappedSupplier = semaphore != null ? boundedSupplier(task) : task;
-    if (timeout != null) {
-      wrappedSupplier = timedSupplier(wrappedSupplier);
+    Supplier<T> wrapped = task;
+    if (maxConcurrency > 0) {
+      final var semaphore = new Semaphore(maxConcurrency);
+      wrapped = boundedSupplier(task, semaphore);
     }
-    return Blockless.supplier(CallableContext.wrap(wrappedSupplier::get, propagators));
+    if (timeout != null) {
+      wrapped = timedSupplier(wrapped);
+    }
+    return Blockless.supplier(CallableContext.wrap(wrapped::get, propagators));
+  }
+
+  /**
+   * Applies {@code fn} to each element on virtual threads with context propagation, returning
+   * results in input order. Blocks until all tasks complete.
+   *
+   * <p>With {@link #withMaxConcurrency(int)}, uses a sliding window — at most N virtual threads are
+   * alive at any time. On failure, remaining in-progress tasks are cancelled.
+   */
+  public <T, R> List<R> map(List<T> items, Function<T, R> fn) {
+    Objects.requireNonNull(items, "items");
+    Objects.requireNonNull(fn, "fn");
+
+    final var window = maxConcurrency > 0 ? maxConcurrency : items.size();
+    final var results = new ArrayList<R>(items.size());
+    final var wip = new ArrayDeque<VirtualTask<R>>(Math.min(window, 16));
+    var success = false;
+
+    try {
+      for (final var item : items) {
+        if (wip.size() >= window) {
+          results.add(collectFirst(wip));
+        }
+        wip.addLast(startTask(() -> fn.apply(item)));
+      }
+      while (!wip.isEmpty()) {
+        results.add(collectFirst(wip));
+      }
+      success = true;
+      return results;
+    } finally {
+      if (!success) {
+        cancelAndJoinAll(wip);
+      }
+    }
+  }
+
+  /**
+   * Computes a value for each key on virtual threads with context propagation, returning a map
+   * preserving key iteration order. Blocks until all tasks complete.
+   */
+  public <K, V> Map<K, V> asMap(Collection<K> keys, Function<K, V> valueMapper) {
+    Objects.requireNonNull(keys, "keys");
+    Objects.requireNonNull(valueMapper, "valueMapper");
+
+    final var keyList = List.copyOf(keys);
+    final var values = map(keyList, valueMapper::apply);
+
+    final var result = new LinkedHashMap<K, V>();
+    for (int i = 0; i < keyList.size(); i++) {
+      result.put(keyList.get(i), values.get(i));
+    }
+    return result;
+  }
+
+  /**
+   * Like {@link #map}, but collects per-item results instead of failing fast. Every task runs to
+   * completion — no cancellation on failure. The returned list matches {@code items} in order; each
+   * element is either {@link Either#ok(Object)} or {@link Either#fail(Object)}.
+   */
+  public <T, R> List<Either<R, Throwable>> toEither(List<T> items, Function<T, R> fn) {
+    Objects.requireNonNull(items, "items");
+    Objects.requireNonNull(fn, "fn");
+
+    final var window = maxConcurrency > 0 ? maxConcurrency : items.size();
+    final var results = new ArrayList<Either<R, Throwable>>(items.size());
+    final var wip = new ArrayDeque<VirtualTask<R>>(Math.min(window, 16));
+
+    for (final var item : items) {
+      if (wip.size() >= window) {
+        results.add(collectFirstAsEither(wip));
+      }
+      wip.addLast(startTask(() -> fn.apply(item)));
+    }
+    while (!wip.isEmpty()) {
+      results.add(collectFirstAsEither(wip));
+    }
+
+    return List.copyOf(results);
+  }
+
+  /**
+   * Like {@link #asMap}, but collects per-key results instead of failing fast. Every task runs to
+   * completion. The returned map is keyed by {@code keys} with iteration order preserved.
+   */
+  public <K, V> Map<K, Either<V, Throwable>> toEitherMap(
+      Collection<K> keys, Function<K, V> valueMapper) {
+    Objects.requireNonNull(keys, "keys");
+    Objects.requireNonNull(valueMapper, "valueMapper");
+
+    final var keyList = List.copyOf(keys);
+    final var eithers = toEither(keyList, valueMapper::apply);
+
+    final var result = new LinkedHashMap<K, Either<V, Throwable>>();
+    for (int i = 0; i < keyList.size(); i++) {
+      result.put(keyList.get(i), eithers.get(i));
+    }
+    return Collections.unmodifiableMap(result);
+  }
+
+  // ── Internal task management ──
+
+  private record VirtualTask<R>(
+      Thread thread, AtomicReference<R> result, AtomicReference<Throwable> error) {}
+
+  private <R> VirtualTask<R> startTask(Supplier<R> task) {
+    final var result = new AtomicReference<R>();
+    final var error = new AtomicReference<Throwable>();
+
+    Supplier<R> wrapped = task;
+    if (timeout != null) {
+      wrapped = timedSupplier(wrapped);
+    }
+    final var finalWrapped = wrapped;
+
+    final var callable = CallableContext.wrap((Callable<R>) finalWrapped::get, propagators);
+    final var thread =
+        Thread.startVirtualThread(
+            () -> {
+              try {
+                result.set(callable.call());
+              } catch (Exception e) {
+                error.set(e);
+              }
+            });
+
+    return new VirtualTask<>(thread, result, error);
+  }
+
+  private <R> R collectFirst(ArrayDeque<VirtualTask<R>> wip) {
+    final var task = wip.pollFirst();
+    joinTask(task);
+    if (task.error().get() != null) {
+      throw wrapIfNeeded(task.error().get());
+    }
+    return task.result().get();
+  }
+
+  private <R> Either<R, Throwable> collectFirstAsEither(ArrayDeque<VirtualTask<R>> wip) {
+    final var task = wip.pollFirst();
+    joinTask(task);
+    if (task.error().get() != null) {
+      final var cause = task.error().get();
+      return Either.fail(
+          cause instanceof RuntimeException re && re.getCause() != null ? re.getCause() : cause);
+    }
+    return Either.ok(task.result().get());
+  }
+
+  private <R> void joinTask(VirtualTask<R> task) {
+    try {
+      task.thread().join();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
+    }
+  }
+
+  private <R> void cancelAndJoinAll(ArrayDeque<VirtualTask<R>> wip) {
+    for (final var task : wip) {
+      task.thread().interrupt();
+    }
+    for (final var task : wip) {
+      try {
+        task.thread().join();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    wip.clear();
+  }
+
+  private static RuntimeException wrapIfNeeded(Throwable t) {
+    if (t instanceof RuntimeException re) {
+      return re;
+    }
+    return new RuntimeException(t);
   }
 
   private <T> Supplier<T> timedSupplier(Supplier<T> task) {
@@ -97,7 +286,6 @@ public final class Parallel {
                     taskThread.interrupt();
                   }
                 } catch (InterruptedException ignored) {
-                  // Timer cancelled — task completed in time
                 }
               });
       try {
@@ -109,7 +297,7 @@ public final class Parallel {
     };
   }
 
-  private <T> Supplier<T> boundedSupplier(Supplier<T> task) {
+  private <T> Supplier<T> boundedSupplier(Supplier<T> task, Semaphore semaphore) {
     return () -> {
       semaphore.acquireUninterruptibly();
       try {
@@ -118,88 +306,5 @@ public final class Parallel {
         semaphore.release();
       }
     };
-  }
-
-  /**
-   * Applies {@code fn} to each element on virtual threads with context propagation, returning
-   * results in input order. Blocks until all tasks complete.
-   */
-  public <T, R> List<R> map(List<T> items, Function<T, R> fn) {
-    Objects.requireNonNull(items, "items");
-    Objects.requireNonNull(fn, "fn");
-
-    final var suppliers = items.stream().map(item -> async(() -> fn.apply(item))).toList();
-
-    return suppliers.stream().map(Supplier::get).toList();
-  }
-
-  /**
-   * Computes a value for each key on virtual threads with context propagation, returning a map
-   * preserving key iteration order. Blocks until all tasks complete.
-   */
-  public <K, V> Map<K, V> asMap(Collection<K> keys, Function<K, V> valueMapper) {
-    Objects.requireNonNull(keys, "keys");
-    Objects.requireNonNull(valueMapper, "valueMapper");
-
-    final var entries =
-        keys.stream().map(key -> Map.entry(key, async(() -> valueMapper.apply(key)))).toList();
-
-    final var result = new LinkedHashMap<K, V>();
-    for (var entry : entries) {
-      result.put(entry.getKey(), entry.getValue().get());
-    }
-    return result;
-  }
-
-  /**
-   * Like {@link #map}, but collects per-item results instead of failing fast. Every task runs to
-   * completion. The returned list matches {@code items} in order; each element is either {@link
-   * Either#ok(Object)} or {@link Either#fail(Object)}. The cause is unwrapped from {@link
-   * RuntimeException} when present.
-   */
-  public <T, R> List<Either<R, Throwable>> toEither(List<T> items, Function<T, R> fn) {
-    Objects.requireNonNull(items, "items");
-    Objects.requireNonNull(fn, "fn");
-
-    final var suppliers = items.stream().map(item -> async(() -> fn.apply(item))).toList();
-
-    final var results = new ArrayList<Either<R, Throwable>>(suppliers.size());
-
-    for (final var supplier : suppliers) {
-      try {
-        results.add(Either.ok(supplier.get()));
-      } catch (final RuntimeException e) {
-        results.add(Either.fail(e.getCause() != null ? e.getCause() : e));
-      }
-    }
-
-    return List.copyOf(results);
-  }
-
-  /**
-   * Like {@link #asMap}, but collects per-key results instead of failing fast. Every task runs to
-   * completion. The returned map is keyed by {@code keys} with iteration order preserved; each
-   * value is either {@link Either#ok(Object)} or {@link Either#fail(Object)}. The cause is
-   * unwrapped from {@link RuntimeException} when present.
-   */
-  public <K, V> Map<K, Either<V, Throwable>> toEitherMap(
-      Collection<K> keys, Function<K, V> valueMapper) {
-    Objects.requireNonNull(keys, "keys");
-    Objects.requireNonNull(valueMapper, "valueMapper");
-
-    final var entries =
-        keys.stream().map(key -> Map.entry(key, async(() -> valueMapper.apply(key)))).toList();
-
-    final var result = new LinkedHashMap<K, Either<V, Throwable>>();
-
-    for (final var entry : entries) {
-      try {
-        result.put(entry.getKey(), Either.ok(entry.getValue().get()));
-      } catch (final RuntimeException e) {
-        result.put(entry.getKey(), Either.fail(e.getCause() != null ? e.getCause() : e));
-      }
-    }
-
-    return Collections.unmodifiableMap(new LinkedHashMap<>(result));
   }
 }

@@ -8,6 +8,7 @@ import io.github.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -233,6 +234,122 @@ class ParallelTest {
       assertThrows(
           IllegalArgumentException.class,
           () -> Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(0));
+    }
+  }
+
+  @Nested
+  class SlidingWindow {
+
+    @Test
+    void limitsAliveVirtualThreads() {
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(3);
+      final var maxAlive = new AtomicInteger(0);
+      final var alive = new AtomicInteger(0);
+      final var items = IntStream.rangeClosed(1, 100).boxed().toList();
+
+      boundedParallel.map(
+          items,
+          i -> {
+            final int a = alive.incrementAndGet();
+            maxAlive.updateAndGet(max -> Math.max(max, a));
+            try {
+              Thread.sleep(10);
+            } catch (final InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            alive.decrementAndGet();
+            return i;
+          });
+
+      assertTrue(maxAlive.get() <= 3, "expected at most 3 VTs alive, but was " + maxAlive.get());
+      assertTrue(
+          maxAlive.get() >= 2,
+          "expected concurrent execution, but max alive was " + maxAlive.get());
+    }
+
+    @Test
+    void unboundedLaunchesAllEagerly() {
+      final var maxAlive = new AtomicInteger(0);
+      final var alive = new AtomicInteger(0);
+      final var items = IntStream.rangeClosed(1, 20).boxed().toList();
+
+      parallel.map(
+          items,
+          i -> {
+            final int a = alive.incrementAndGet();
+            maxAlive.updateAndGet(max -> Math.max(max, a));
+            try {
+              Thread.sleep(50);
+            } catch (final InterruptedException e) {
+              Thread.currentThread().interrupt();
+            }
+            alive.decrementAndGet();
+            return i;
+          });
+
+      assertTrue(
+          maxAlive.get() > 3,
+          "expected many VTs alive without maxConcurrency, but was " + maxAlive.get());
+    }
+  }
+
+  @Nested
+  class Cancellation {
+
+    @Test
+    void cancelsRemainingTasksOnFailure() {
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
+      final var completed = new AtomicInteger(0);
+      final var started = new AtomicInteger(0);
+
+      assertThrows(
+          RuntimeException.class,
+          () ->
+              boundedParallel.map(
+                  IntStream.rangeClosed(1, 20).boxed().toList(),
+                  i -> {
+                    started.incrementAndGet();
+                    if (i == 1) {
+                      throw new IllegalArgumentException("fail on first");
+                    }
+                    try {
+                      Thread.sleep(500);
+                    } catch (final InterruptedException e) {
+                      Thread.currentThread().interrupt();
+                      throw new RuntimeException(e);
+                    }
+                    completed.incrementAndGet();
+                    return i;
+                  }));
+
+      assertTrue(
+          started.get() < 20,
+          "expected sliding window to prevent launching all 20, but started " + started.get());
+    }
+
+    @Test
+    void toEitherDoesNotCancelOnFailure() {
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(3);
+      final var completed = new AtomicInteger(0);
+
+      final var eithers =
+          boundedParallel.toEither(
+              IntStream.rangeClosed(1, 10).boxed().toList(),
+              i -> {
+                if (i == 3) {
+                  throw new IllegalArgumentException("fail on 3");
+                }
+                completed.incrementAndGet();
+                return i * 10;
+              });
+
+      assertEquals(10, eithers.size());
+      assertEquals(9, completed.get(), "all non-failing tasks must complete");
+      assertTrue(eithers.get(2).isFailed());
+      assertEquals(9, eithers.stream().filter(Either::isOk).count());
     }
   }
 
