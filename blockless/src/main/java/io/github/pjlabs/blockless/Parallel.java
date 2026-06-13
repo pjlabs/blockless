@@ -36,11 +36,13 @@ public final class Parallel {
 
   private final List<ContextPropagator> propagators;
   private final int maxConcurrency;
+  private final Semaphore semaphore;
   private final Duration timeout;
 
   private Parallel(List<ContextPropagator> propagators, int maxConcurrency, Duration timeout) {
     this.propagators = List.copyOf(propagators);
     this.maxConcurrency = maxConcurrency;
+    this.semaphore = maxConcurrency > 0 ? new Semaphore(maxConcurrency) : null;
     this.timeout = timeout;
   }
 
@@ -86,8 +88,7 @@ public final class Parallel {
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
     Supplier<T> wrapped = task;
-    if (maxConcurrency > 0) {
-      final var semaphore = new Semaphore(maxConcurrency);
+    if (semaphore != null) {
       wrapped = boundedSupplier(task, semaphore);
     }
     if (timeout != null) {
@@ -256,12 +257,19 @@ public final class Parallel {
     for (final var task : wip) {
       task.thread().interrupt();
     }
+    var wasInterrupted = false;
     for (final var task : wip) {
-      try {
-        task.thread().join();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
+      while (true) {
+        try {
+          task.thread().join();
+          break;
+        } catch (InterruptedException e) {
+          wasInterrupted = true;
+        }
       }
+    }
+    if (wasInterrupted) {
+      Thread.currentThread().interrupt();
     }
     wip.clear();
   }
