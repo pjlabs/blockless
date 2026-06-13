@@ -110,7 +110,7 @@ public final class Parallel {
 
     final var window = maxConcurrency > 0 ? maxConcurrency : items.size();
     final var results = new ArrayList<R>(items.size());
-    final var wip = new ArrayDeque<VirtualTask<R>>(Math.min(window, 16));
+    final var wip = new ArrayDeque<VirtualTask<R>>(window);
     var success = false;
 
     try {
@@ -161,7 +161,7 @@ public final class Parallel {
 
     final var window = maxConcurrency > 0 ? maxConcurrency : items.size();
     final var results = new ArrayList<Either<R, Throwable>>(items.size());
-    final var wip = new ArrayDeque<VirtualTask<R>>(Math.min(window, 16));
+    final var wip = new ArrayDeque<VirtualTask<R>>(window);
 
     for (final var item : items) {
       if (wip.size() >= window) {
