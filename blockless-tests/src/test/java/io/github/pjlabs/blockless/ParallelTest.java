@@ -354,6 +354,89 @@ class ParallelTest {
   }
 
   @Nested
+  class Throughput {
+
+    @Test
+    void handlesHighItemCountWithSlidingWindow() {
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(50);
+      final var items = IntStream.rangeClosed(1, 10_000).boxed().toList();
+      final var maxAlive = new AtomicInteger(0);
+      final var alive = new AtomicInteger(0);
+
+      final var start = System.nanoTime();
+      final var results =
+          boundedParallel.map(
+              items,
+              i -> {
+                final int a = alive.incrementAndGet();
+                maxAlive.updateAndGet(max -> Math.max(max, a));
+                alive.decrementAndGet();
+                return i * 2;
+              });
+      final var elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+      assertEquals(10_000, results.size());
+      assertEquals(2, results.get(0));
+      assertEquals(20_000, results.get(9_999));
+      assertTrue(maxAlive.get() <= 50, "expected at most 50 VTs alive, but was " + maxAlive.get());
+      assertTrue(elapsedMs < 10_000, "expected completion under 10s, but took " + elapsedMs + "ms");
+    }
+
+    @Test
+    void handlesHighItemCountUnbounded() {
+      final var items = IntStream.rangeClosed(1, 10_000).boxed().toList();
+
+      final var start = System.nanoTime();
+      final var results = parallel.map(items, i -> i * 2);
+      final var elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+      assertEquals(10_000, results.size());
+      assertEquals(2, results.get(0));
+      assertEquals(20_000, results.get(9_999));
+      assertTrue(elapsedMs < 10_000, "expected completion under 10s, but took " + elapsedMs + "ms");
+    }
+
+    @Test
+    void toEitherHandlesHighItemCount() {
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(50);
+      final var items = IntStream.rangeClosed(1, 10_000).boxed().toList();
+
+      final var start = System.nanoTime();
+      final var results =
+          boundedParallel.toEither(
+              items,
+              i -> {
+                if (i % 1000 == 0) {
+                  throw new RuntimeException("fail on " + i);
+                }
+                return i * 2;
+              });
+      final var elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+      assertEquals(10_000, results.size());
+      assertEquals(10, results.stream().filter(Either::isFailed).count());
+      assertEquals(9_990, results.stream().filter(Either::isOk).count());
+      assertTrue(elapsedMs < 10_000, "expected completion under 10s, but took " + elapsedMs + "ms");
+    }
+
+    @Test
+    void propagatesMdcUnderHighItemCount() {
+      MDC.put("traceId", "high-throughput-trace");
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(50);
+      final var items = IntStream.rangeClosed(1, 1_000).boxed().toList();
+
+      final var results = boundedParallel.map(items, i -> MDC.get("traceId"));
+
+      assertTrue(
+          results.stream().allMatch("high-throughput-trace"::equals),
+          "all 1000 tasks must see propagated MDC");
+    }
+  }
+
+  @Nested
   class Timeout {
 
     @Test
