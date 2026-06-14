@@ -84,6 +84,9 @@ public final class Parallel {
   /**
    * Runs a supplier on a virtual thread with context propagation. Returns a {@link Supplier} whose
    * {@code get()} blocks until the result is available.
+   *
+   * <p>When {@link #withMaxConcurrency(int)} is configured, a shared semaphore enforces the
+   * concurrency limit across all suppliers created from this {@link Parallel} instance.
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
