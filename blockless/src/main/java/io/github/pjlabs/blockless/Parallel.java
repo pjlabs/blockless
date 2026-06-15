@@ -110,38 +110,41 @@ public final class Parallel {
       return List.of();
     }
 
-    final var size = items.size();
-    final var window = maxConcurrency > 0 ? maxConcurrency : size;
+    final var totalTaskCount = items.size();
+    final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
     final var completionQueue = new LinkedBlockingQueue<Integer>();
-    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(size, null));
-    final var results = (R[]) new Object[size];
-    var inFlight = 0;
-    var nextSubmit = 0;
-    var collected = 0;
+    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(totalTaskCount, null));
+    final var results = (R[]) new Object[totalTaskCount];
+    var activeTaskCount = 0;
+    var nextTaskIndex = 0;
+    var completedTaskCount = 0;
     var success = false;
 
     try {
-      while (nextSubmit < size && inFlight < window) {
-        tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
-        nextSubmit++;
-        inFlight++;
+      while (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
+        tasks.set(
+            nextTaskIndex, startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
+        nextTaskIndex++;
+        activeTaskCount++;
       }
 
-      while (collected < size) {
-        final var doneIndex = takeFromQueue(completionQueue);
-        final var task = tasks.get(doneIndex);
+      while (completedTaskCount < totalTaskCount) {
+        final var completedTaskIndex = takeFromQueue(completionQueue);
+        final var task = tasks.get(completedTaskIndex);
         joinTask(task);
         if (task.error().get() != null) {
           throw wrapIfNeeded(task.error().get());
         }
-        results[doneIndex] = task.result().get();
-        collected++;
-        inFlight--;
+        results[completedTaskIndex] = task.result().get();
+        completedTaskCount++;
+        activeTaskCount--;
 
-        if (nextSubmit < size) {
-          tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
-          nextSubmit++;
-          inFlight++;
+        if (nextTaskIndex < totalTaskCount) {
+          tasks.set(
+              nextTaskIndex,
+              startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
+          nextTaskIndex++;
+          activeTaskCount++;
         }
       }
 
@@ -185,43 +188,46 @@ public final class Parallel {
       return List.of();
     }
 
-    final var size = items.size();
-    final var window = maxConcurrency > 0 ? maxConcurrency : size;
+    final var totalTaskCount = items.size();
+    final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
     final var completionQueue = new LinkedBlockingQueue<Integer>();
-    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(size, null));
-    final var results = (Either<R, Throwable>[]) new Either[size];
-    var inFlight = 0;
-    var nextSubmit = 0;
-    var collected = 0;
+    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(totalTaskCount, null));
+    final var results = (Either<R, Throwable>[]) new Either[totalTaskCount];
+    var activeTaskCount = 0;
+    var nextTaskIndex = 0;
+    var completedTaskCount = 0;
 
     try {
-      while (nextSubmit < size && inFlight < window) {
-        tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
-        nextSubmit++;
-        inFlight++;
+      while (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
+        tasks.set(
+            nextTaskIndex, startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
+        nextTaskIndex++;
+        activeTaskCount++;
       }
 
-      while (collected < size) {
-        final var doneIndex = takeFromQueue(completionQueue);
-        final var task = tasks.get(doneIndex);
+      while (completedTaskCount < totalTaskCount) {
+        final var completedTaskIndex = takeFromQueue(completionQueue);
+        final var task = tasks.get(completedTaskIndex);
         joinTask(task);
         if (task.error().get() != null) {
           final var cause = task.error().get();
-          results[doneIndex] =
+          results[completedTaskIndex] =
               Either.fail(
                   cause instanceof RuntimeException re && re.getCause() != null
                       ? re.getCause()
                       : cause);
         } else {
-          results[doneIndex] = Either.ok(task.result().get());
+          results[completedTaskIndex] = Either.ok(task.result().get());
         }
-        collected++;
-        inFlight--;
+        completedTaskCount++;
+        activeTaskCount--;
 
-        if (nextSubmit < size) {
-          tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
-          nextSubmit++;
-          inFlight++;
+        if (nextTaskIndex < totalTaskCount) {
+          tasks.set(
+              nextTaskIndex,
+              startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
+          nextTaskIndex++;
+          activeTaskCount++;
         }
       }
 
