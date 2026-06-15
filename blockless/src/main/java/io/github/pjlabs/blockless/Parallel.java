@@ -194,37 +194,41 @@ public final class Parallel {
     var nextSubmit = 0;
     var collected = 0;
 
-    while (nextSubmit < size && inFlight < window) {
-      tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
-      nextSubmit++;
-      inFlight++;
-    }
-
-    while (collected < size) {
-      final var doneIndex = takeFromQueue(completionQueue);
-      final var task = tasks.get(doneIndex);
-      joinTask(task);
-      if (task.error().get() != null) {
-        final var cause = task.error().get();
-        results[doneIndex] =
-            Either.fail(
-                cause instanceof RuntimeException re && re.getCause() != null
-                    ? re.getCause()
-                    : cause);
-      } else {
-        results[doneIndex] = Either.ok(task.result().get());
-      }
-      collected++;
-      inFlight--;
-
-      if (nextSubmit < size) {
+    try {
+      while (nextSubmit < size && inFlight < window) {
         tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
         nextSubmit++;
         inFlight++;
       }
-    }
 
-    return List.of(results);
+      while (collected < size) {
+        final var doneIndex = takeFromQueue(completionQueue);
+        final var task = tasks.get(doneIndex);
+        joinTask(task);
+        if (task.error().get() != null) {
+          final var cause = task.error().get();
+          results[doneIndex] =
+              Either.fail(
+                  cause instanceof RuntimeException re && re.getCause() != null
+                      ? re.getCause()
+                      : cause);
+        } else {
+          results[doneIndex] = Either.ok(task.result().get());
+        }
+        collected++;
+        inFlight--;
+
+        if (nextSubmit < size) {
+          tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
+          nextSubmit++;
+          inFlight++;
+        }
+      }
+
+      return List.of(results);
+    } finally {
+      cancelAndJoinAll(tasks);
+    }
   }
 
   /**
