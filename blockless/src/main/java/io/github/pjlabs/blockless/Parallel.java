@@ -10,7 +10,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -36,13 +35,11 @@ public final class Parallel {
 
   private final List<ContextPropagator> propagators;
   private final int maxConcurrency;
-  private final Semaphore semaphore;
   private final Duration timeout;
 
   private Parallel(List<ContextPropagator> propagators, int maxConcurrency, Duration timeout) {
     this.propagators = List.copyOf(propagators);
     this.maxConcurrency = maxConcurrency;
-    this.semaphore = maxConcurrency > 0 ? new Semaphore(maxConcurrency) : null;
     this.timeout = timeout;
   }
 
@@ -85,15 +82,12 @@ public final class Parallel {
    * Runs a supplier on a virtual thread with context propagation. Returns a {@link Supplier} whose
    * {@code get()} blocks until the result is available.
    *
-   * <p>When {@link #withMaxConcurrency(int)} is configured, a shared semaphore enforces the
-   * concurrency limit across all suppliers created from this {@link Parallel} instance.
+   * <p>{@link #withMaxConcurrency(int)} does not affect this method — it only controls the sliding
+   * window in {@link #map} and {@link #toEither}. For bounded batch work, use {@link #map}.
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
     Supplier<T> wrapped = task;
-    if (semaphore != null) {
-      wrapped = boundedSupplier(task, semaphore);
-    }
     if (timeout != null) {
       wrapped = timedSupplier(wrapped);
     }
@@ -319,17 +313,6 @@ public final class Parallel {
       } finally {
         done.set(true);
         timer.interrupt();
-      }
-    };
-  }
-
-  private <T> Supplier<T> boundedSupplier(Supplier<T> task, Semaphore semaphore) {
-    return () -> {
-      semaphore.acquireUninterruptibly();
-      try {
-        return task.get();
-      } finally {
-        semaphore.release();
       }
     };
   }

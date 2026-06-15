@@ -126,39 +126,6 @@ class ParallelTest {
   }
 
   @Test
-  void asyncSharesSemaphoreAcrossCalls() {
-    final var boundedParallel =
-        Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(2);
-    final var maxConcurrent = new AtomicInteger(0);
-    final var current = new AtomicInteger(0);
-
-    final var suppliers =
-        IntStream.rangeClosed(1, 5)
-            .mapToObj(
-                i ->
-                    boundedParallel.async(
-                        () -> {
-                          final int c = current.incrementAndGet();
-                          maxConcurrent.updateAndGet(max -> Math.max(max, c));
-                          try {
-                            Thread.sleep(50);
-                          } catch (final InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                          }
-                          current.decrementAndGet();
-                          return i;
-                        }))
-            .toList();
-
-    final var results = suppliers.stream().map(java.util.function.Supplier::get).toList();
-
-    assertEquals(List.of(1, 2, 3, 4, 5), results);
-    assertTrue(
-        maxConcurrent.get() <= 2,
-        "expected shared semaphore to limit to 2 concurrent, but was " + maxConcurrent.get());
-  }
-
-  @Test
   void asMapPreservesKeyOrder() {
     final var keys = List.of("c", "a", "b");
     final var result = parallel.asMap(keys, k -> k.toUpperCase());
