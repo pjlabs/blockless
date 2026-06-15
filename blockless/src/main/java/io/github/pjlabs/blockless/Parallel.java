@@ -1,7 +1,6 @@
 package io.github.pjlabs.blockless;
 
 import java.time.Duration;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -10,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -23,8 +23,8 @@ import java.util.function.Supplier;
  * captured at call time and propagated using the configured {@link ContextPropagator} instances.
  *
  * <p>When {@link #withMaxConcurrency(int)} is set, {@link #map} and {@link #toEither} use a sliding
- * window — at most N virtual threads are alive at any time. Without it, all tasks are launched
- * eagerly.
+ * window — at most N virtual threads are alive at any time. Tasks are collected in completion order
+ * to avoid head-of-line blocking, but results are always returned in input order.
  *
  * <pre>{@code
  * var parallel = Parallel.create(new Slf4jMdcContextPropagator());
@@ -99,33 +99,57 @@ public final class Parallel {
    * results in input order. Blocks until all tasks complete.
    *
    * <p>With {@link #withMaxConcurrency(int)}, uses a sliding window — at most N virtual threads are
-   * alive at any time. On failure, remaining in-progress tasks are cancelled.
+   * alive at any time. Tasks are collected in completion order to maximize throughput. On failure,
+   * remaining in-progress tasks are cancelled.
    */
+  @SuppressWarnings("unchecked")
   public <T, R> List<R> map(List<T> items, Function<T, R> fn) {
     Objects.requireNonNull(items, "items");
     Objects.requireNonNull(fn, "fn");
+    if (items.isEmpty()) {
+      return List.of();
+    }
 
-    final var window = maxConcurrency > 0 ? maxConcurrency : items.size();
-    final var results = new ArrayList<R>(items.size());
-    final var wip = new ArrayDeque<VirtualTask<R>>(window);
+    final var size = items.size();
+    final var window = maxConcurrency > 0 ? maxConcurrency : size;
+    final var completionQueue = new LinkedBlockingQueue<Integer>();
+    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(size, null));
+    final var results = (R[]) new Object[size];
+    var inFlight = 0;
+    var nextSubmit = 0;
+    var collected = 0;
     var success = false;
 
     try {
-      for (final var item : items) {
-        if (wip.size() >= window) {
-          results.add(collectFirst(wip));
-          drainCompleted(wip, results);
+      while (nextSubmit < size && inFlight < window) {
+        tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
+        nextSubmit++;
+        inFlight++;
+      }
+
+      while (collected < size) {
+        final var doneIndex = takeFromQueue(completionQueue);
+        final var task = tasks.get(doneIndex);
+        joinTask(task);
+        if (task.error().get() != null) {
+          throw wrapIfNeeded(task.error().get());
         }
-        wip.addLast(startTask(() -> fn.apply(item)));
+        results[doneIndex] = task.result().get();
+        collected++;
+        inFlight--;
+
+        if (nextSubmit < size) {
+          tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
+          nextSubmit++;
+          inFlight++;
+        }
       }
-      while (!wip.isEmpty()) {
-        results.add(collectFirst(wip));
-      }
+
       success = true;
-      return results;
+      return List.of(results);
     } finally {
       if (!success) {
-        cancelAndJoinAll(wip);
+        cancelAndJoinAll(tasks);
       }
     }
   }
@@ -153,26 +177,54 @@ public final class Parallel {
    * completion — no cancellation on failure. The returned list matches {@code items} in order; each
    * element is either {@link Either#ok(Object)} or {@link Either#fail(Object)}.
    */
+  @SuppressWarnings("unchecked")
   public <T, R> List<Either<R, Throwable>> toEither(List<T> items, Function<T, R> fn) {
     Objects.requireNonNull(items, "items");
     Objects.requireNonNull(fn, "fn");
+    if (items.isEmpty()) {
+      return List.of();
+    }
 
-    final var window = maxConcurrency > 0 ? maxConcurrency : items.size();
-    final var results = new ArrayList<Either<R, Throwable>>(items.size());
-    final var wip = new ArrayDeque<VirtualTask<R>>(window);
+    final var size = items.size();
+    final var window = maxConcurrency > 0 ? maxConcurrency : size;
+    final var completionQueue = new LinkedBlockingQueue<Integer>();
+    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(size, null));
+    final var results = (Either<R, Throwable>[]) new Either[size];
+    var inFlight = 0;
+    var nextSubmit = 0;
+    var collected = 0;
 
-    for (final var item : items) {
-      if (wip.size() >= window) {
-        results.add(collectFirstAsEither(wip));
-        drainCompletedAsEither(wip, results);
+    while (nextSubmit < size && inFlight < window) {
+      tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
+      nextSubmit++;
+      inFlight++;
+    }
+
+    while (collected < size) {
+      final var doneIndex = takeFromQueue(completionQueue);
+      final var task = tasks.get(doneIndex);
+      joinTask(task);
+      if (task.error().get() != null) {
+        final var cause = task.error().get();
+        results[doneIndex] =
+            Either.fail(
+                cause instanceof RuntimeException re && re.getCause() != null
+                    ? re.getCause()
+                    : cause);
+      } else {
+        results[doneIndex] = Either.ok(task.result().get());
       }
-      wip.addLast(startTask(() -> fn.apply(item)));
-    }
-    while (!wip.isEmpty()) {
-      results.add(collectFirstAsEither(wip));
+      collected++;
+      inFlight--;
+
+      if (nextSubmit < size) {
+        tasks.set(nextSubmit, startTask(nextSubmit, items.get(nextSubmit), fn, completionQueue));
+        nextSubmit++;
+        inFlight++;
+      }
     }
 
-    return List.copyOf(results);
+    return List.of(results);
   }
 
   /**
@@ -199,17 +251,18 @@ public final class Parallel {
   private record VirtualTask<R>(
       Thread thread, AtomicReference<R> result, AtomicReference<Throwable> error) {}
 
-  private <R> VirtualTask<R> startTask(Supplier<R> task) {
+  private <T, R> VirtualTask<R> startTask(
+      int index, T item, Function<T, R> fn, LinkedBlockingQueue<Integer> completionQueue) {
     final var result = new AtomicReference<R>();
     final var error = new AtomicReference<Throwable>();
 
-    Supplier<R> wrapped = task;
+    Supplier<R> task = () -> fn.apply(item);
     if (timeout != null) {
-      wrapped = timedSupplier(wrapped);
+      task = timedSupplier(task);
     }
-    final var finalWrapped = wrapped;
+    final var finalTask = task;
 
-    final var callable = CallableContext.wrap((Callable<R>) finalWrapped::get, propagators);
+    final var callable = CallableContext.wrap((Callable<R>) finalTask::get, propagators);
     final var thread =
         Thread.startVirtualThread(
             () -> {
@@ -217,42 +270,20 @@ public final class Parallel {
                 result.set(callable.call());
               } catch (Exception e) {
                 error.set(e);
+              } finally {
+                completionQueue.add(index);
               }
             });
 
     return new VirtualTask<>(thread, result, error);
   }
 
-  private <R> R collectFirst(ArrayDeque<VirtualTask<R>> wip) {
-    final var task = wip.pollFirst();
-    joinTask(task);
-    if (task.error().get() != null) {
-      throw wrapIfNeeded(task.error().get());
-    }
-    return task.result().get();
-  }
-
-  private <R> Either<R, Throwable> collectFirstAsEither(ArrayDeque<VirtualTask<R>> wip) {
-    final var task = wip.pollFirst();
-    joinTask(task);
-    if (task.error().get() != null) {
-      final var cause = task.error().get();
-      return Either.fail(
-          cause instanceof RuntimeException re && re.getCause() != null ? re.getCause() : cause);
-    }
-    return Either.ok(task.result().get());
-  }
-
-  private <R> void drainCompleted(ArrayDeque<VirtualTask<R>> wip, List<R> results) {
-    while (!wip.isEmpty() && !wip.peekFirst().thread().isAlive()) {
-      results.add(collectFirst(wip));
-    }
-  }
-
-  private <R> void drainCompletedAsEither(
-      ArrayDeque<VirtualTask<R>> wip, List<Either<R, Throwable>> results) {
-    while (!wip.isEmpty() && !wip.peekFirst().thread().isAlive()) {
-      results.add(collectFirstAsEither(wip));
+  private static int takeFromQueue(LinkedBlockingQueue<Integer> queue) {
+    try {
+      return queue.take();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
     }
   }
 
@@ -265,25 +296,28 @@ public final class Parallel {
     }
   }
 
-  private <R> void cancelAndJoinAll(ArrayDeque<VirtualTask<R>> wip) {
-    for (final var task : wip) {
-      task.thread().interrupt();
+  private <R> void cancelAndJoinAll(List<VirtualTask<R>> tasks) {
+    for (final var task : tasks) {
+      if (task != null) {
+        task.thread().interrupt();
+      }
     }
     var wasInterrupted = false;
-    for (final var task : wip) {
-      while (true) {
-        try {
-          task.thread().join();
-          break;
-        } catch (InterruptedException e) {
-          wasInterrupted = true;
+    for (final var task : tasks) {
+      if (task != null) {
+        while (true) {
+          try {
+            task.thread().join();
+            break;
+          } catch (InterruptedException e) {
+            wasInterrupted = true;
+          }
         }
       }
     }
     if (wasInterrupted) {
       Thread.currentThread().interrupt();
     }
-    wip.clear();
   }
 
   private static RuntimeException wrapIfNeeded(Throwable t) {
