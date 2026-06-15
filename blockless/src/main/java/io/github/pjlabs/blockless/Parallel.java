@@ -120,6 +120,7 @@ public final class Parallel {
       for (final var item : items) {
         if (wip.size() >= window) {
           results.add(collectFirst(wip));
+          drainCompleted(wip, results);
         }
         wip.addLast(startTask(() -> fn.apply(item)));
       }
@@ -169,6 +170,7 @@ public final class Parallel {
     for (final var item : items) {
       if (wip.size() >= window) {
         results.add(collectFirstAsEither(wip));
+        drainCompletedAsEither(wip, results);
       }
       wip.addLast(startTask(() -> fn.apply(item)));
     }
@@ -245,6 +247,19 @@ public final class Parallel {
           cause instanceof RuntimeException re && re.getCause() != null ? re.getCause() : cause);
     }
     return Either.ok(task.result().get());
+  }
+
+  private <R> void drainCompleted(ArrayDeque<VirtualTask<R>> wip, List<R> results) {
+    while (!wip.isEmpty() && !wip.peekFirst().thread().isAlive()) {
+      results.add(collectFirst(wip));
+    }
+  }
+
+  private <R> void drainCompletedAsEither(
+      ArrayDeque<VirtualTask<R>> wip, List<Either<R, Throwable>> results) {
+    while (!wip.isEmpty() && !wip.peekFirst().thread().isAlive()) {
+      results.add(collectFirstAsEither(wip));
+    }
   }
 
   private <R> void joinTask(VirtualTask<R> task) {

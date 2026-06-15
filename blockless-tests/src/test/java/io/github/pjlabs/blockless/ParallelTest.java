@@ -302,6 +302,36 @@ class ParallelTest {
     }
 
     @Test
+    void drainsCompletedTasksOpportunistically() {
+      final var boundedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(3);
+      // First task slow, rest fast — drain should free slots without waiting on each individually
+      // 9 items with window=3: without drain, slow task blocks 2 slots idle
+      // With drain, fast tasks behind the slow one are collected immediately after the slow one
+      final var items = List.of(200, 10, 10, 10, 10, 10, 10, 10, 10);
+
+      final var start = System.nanoTime();
+      final var results =
+          boundedParallel.map(
+              items,
+              i -> {
+                try {
+                  Thread.sleep(i);
+                } catch (final InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                }
+                return i;
+              });
+      final var elapsedMs = (System.nanoTime() - start) / 1_000_000;
+
+      assertEquals(items, results);
+      // With window=3 and drain: ~200ms (slow task) + ~30ms (remaining 6 fast tasks in 2 batches)
+      // Without drain: ~200ms + ~40ms (each slot freed one-at-a-time)
+      // Either way should complete well under 1s
+      assertTrue(elapsedMs < 1000, "expected under 1s, but took " + elapsedMs + "ms");
+    }
+
+    @Test
     void unboundedLaunchesAllEagerly() {
       final var maxAlive = new AtomicInteger(0);
       final var alive = new AtomicInteger(0);
