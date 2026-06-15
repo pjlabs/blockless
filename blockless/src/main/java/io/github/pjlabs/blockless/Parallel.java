@@ -196,6 +196,7 @@ public final class Parallel {
     var activeTaskCount = 0;
     var nextTaskIndex = 0;
     var completedTaskCount = 0;
+    var success = false;
 
     try {
       while (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
@@ -231,9 +232,12 @@ public final class Parallel {
         }
       }
 
+      success = true;
       return List.of(results);
     } finally {
-      cancelAndJoinAll(tasks);
+      if (!success) {
+        cancelAndJoinAll(tasks);
+      }
     }
   }
 
