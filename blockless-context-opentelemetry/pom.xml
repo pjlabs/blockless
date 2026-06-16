@@ -14,6 +14,7 @@
     <artifactId>blockless-context-opentelemetry</artifactId>
     <packaging>jar</packaging>
     <name>blockless-context-opentelemetry</name>
+    <url>https://github.com/pjlabs/blockless</url>
 
     <dependencies>
         <dependency>

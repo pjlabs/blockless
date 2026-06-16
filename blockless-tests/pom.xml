@@ -14,7 +14,7 @@
     <artifactId>blockless-tests</artifactId>
     <packaging>jar</packaging>
     <name>blockless-tests</name>
-
+    <url>https://github.com/pjlabs/blockless</url>
 
     <dependencies>
         <dependency>

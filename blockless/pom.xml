@@ -14,6 +14,7 @@
     <artifactId>blockless</artifactId>
     <packaging>jar</packaging>
     <name>blockless</name>
+    <url>https://github.com/pjlabs/blockless</url>
 
     <dependencies>
         <dependency>
