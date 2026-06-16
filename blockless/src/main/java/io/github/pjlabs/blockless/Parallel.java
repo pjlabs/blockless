@@ -8,9 +8,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.Semaphore;
+import java.util.concurrent.Callable;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -20,6 +22,10 @@ import java.util.function.Supplier;
  * <p>Each task runs on its own virtual thread via {@link Thread#startVirtualThread}, with context
  * captured at call time and propagated using the configured {@link ContextPropagator} instances.
  *
+ * <p>When {@link #withMaxConcurrency(int)} is set, {@link #map} and {@link #toEither} use a sliding
+ * window — at most N virtual threads are alive at any time. Tasks are collected in completion order
+ * to avoid head-of-line blocking, but results are always returned in input order.
+ *
  * <pre>{@code
  * var parallel = Parallel.create(new Slf4jMdcContextPropagator());
  * List<String> results = parallel.map(ids, id -> fetchName(id));
@@ -28,12 +34,12 @@ import java.util.function.Supplier;
 public final class Parallel {
 
   private final List<ContextPropagator> propagators;
-  private final Semaphore semaphore;
+  private final int maxConcurrency;
   private final Duration timeout;
 
-  private Parallel(List<ContextPropagator> propagators, Semaphore semaphore, Duration timeout) {
+  private Parallel(List<ContextPropagator> propagators, int maxConcurrency, Duration timeout) {
     this.propagators = List.copyOf(propagators);
-    this.semaphore = semaphore;
+    this.maxConcurrency = maxConcurrency;
     this.timeout = timeout;
   }
 
@@ -44,18 +50,19 @@ public final class Parallel {
 
   /** Creates an unbounded {@link Parallel} instance with the given propagators. */
   public static Parallel create(List<ContextPropagator> propagators) {
-    return new Parallel(propagators, null, null);
+    return new Parallel(propagators, 0, null);
   }
 
   /**
    * Returns a new {@link Parallel} with the same propagators but limited to {@code maxConcurrency}
-   * concurrent tasks. Tasks beyond the limit park on virtual threads until a permit is available.
+   * concurrent tasks. In {@link #map} and {@link #toEither}, this controls the sliding window size
+   * — at most N virtual threads are alive at any time.
    */
   public Parallel withMaxConcurrency(int maxConcurrency) {
     if (maxConcurrency < 1) {
       throw new IllegalArgumentException("maxConcurrency must be at least 1");
     }
-    return new Parallel(propagators, new Semaphore(maxConcurrency), timeout);
+    return new Parallel(propagators, maxConcurrency, timeout);
   }
 
   /**
@@ -68,20 +75,270 @@ public final class Parallel {
     if (timeout.isNegative() || timeout.isZero()) {
       throw new IllegalArgumentException("timeout must be positive");
     }
-    return new Parallel(propagators, semaphore, timeout);
+    return new Parallel(propagators, maxConcurrency, timeout);
   }
 
   /**
    * Runs a supplier on a virtual thread with context propagation. Returns a {@link Supplier} whose
    * {@code get()} blocks until the result is available.
+   *
+   * <p>{@link #withMaxConcurrency(int)} does not affect this method — it only controls the sliding
+   * window in {@link #map} and {@link #toEither}. For bounded batch work, use {@link #map}.
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
-    var wrappedSupplier = semaphore != null ? boundedSupplier(task) : task;
+    Supplier<T> wrapped = task;
     if (timeout != null) {
-      wrappedSupplier = timedSupplier(wrappedSupplier);
+      wrapped = timedSupplier(wrapped);
     }
-    return Blockless.supplier(CallableContext.wrap(wrappedSupplier::get, propagators));
+    return Blockless.supplier(CallableContext.wrap(wrapped::get, propagators));
+  }
+
+  /**
+   * Applies {@code fn} to each element on virtual threads with context propagation, returning
+   * results in input order. Blocks until all tasks complete.
+   *
+   * <p>With {@link #withMaxConcurrency(int)}, uses a sliding window — at most N virtual threads are
+   * alive at any time. Tasks are collected in completion order to maximize throughput. On failure,
+   * remaining in-progress tasks are cancelled.
+   */
+  @SuppressWarnings("unchecked")
+  public <T, R> List<R> map(List<T> items, Function<T, R> fn) {
+    Objects.requireNonNull(items, "items");
+    Objects.requireNonNull(fn, "fn");
+    if (items.isEmpty()) {
+      return List.of();
+    }
+
+    final var totalTaskCount = items.size();
+    final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
+    final var completionQueue = new LinkedBlockingQueue<Integer>();
+    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(totalTaskCount, null));
+    final var results = (R[]) new Object[totalTaskCount];
+    var activeTaskCount = 0;
+    var nextTaskIndex = 0;
+    var completedTaskCount = 0;
+    var success = false;
+
+    try {
+      while (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
+        tasks.set(
+            nextTaskIndex, startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
+        nextTaskIndex++;
+        activeTaskCount++;
+      }
+
+      while (completedTaskCount < totalTaskCount) {
+        final var completedTaskIndex = takeFromQueue(completionQueue);
+        final var task = tasks.get(completedTaskIndex);
+        joinTask(task);
+        if (task.error().get() != null) {
+          throw wrapIfNeeded(task.error().get());
+        }
+        results[completedTaskIndex] = task.result().get();
+        completedTaskCount++;
+        activeTaskCount--;
+
+        if (nextTaskIndex < totalTaskCount) {
+          tasks.set(
+              nextTaskIndex,
+              startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
+          nextTaskIndex++;
+          activeTaskCount++;
+        }
+      }
+
+      success = true;
+      return List.of(results);
+    } finally {
+      if (!success) {
+        cancelAndJoinAll(tasks);
+      }
+    }
+  }
+
+  /**
+   * Computes a value for each key on virtual threads with context propagation, returning a map
+   * preserving key iteration order. Blocks until all tasks complete.
+   */
+  public <K, V> Map<K, V> asMap(Collection<K> keys, Function<K, V> valueMapper) {
+    Objects.requireNonNull(keys, "keys");
+    Objects.requireNonNull(valueMapper, "valueMapper");
+
+    final var keyList = List.copyOf(keys);
+    final var values = map(keyList, valueMapper::apply);
+
+    final var result = new LinkedHashMap<K, V>();
+    for (int i = 0; i < keyList.size(); i++) {
+      result.put(keyList.get(i), values.get(i));
+    }
+    return result;
+  }
+
+  /**
+   * Like {@link #map}, but collects per-item results instead of failing fast. Every task runs to
+   * completion — no cancellation on failure. The returned list matches {@code items} in order; each
+   * element is either {@link Either#ok(Object)} or {@link Either#fail(Object)}.
+   */
+  @SuppressWarnings("unchecked")
+  public <T, R> List<Either<R, Throwable>> toEither(List<T> items, Function<T, R> fn) {
+    Objects.requireNonNull(items, "items");
+    Objects.requireNonNull(fn, "fn");
+    if (items.isEmpty()) {
+      return List.of();
+    }
+
+    final var totalTaskCount = items.size();
+    final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
+    final var completionQueue = new LinkedBlockingQueue<Integer>();
+    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(totalTaskCount, null));
+    final var results = (Either<R, Throwable>[]) new Either[totalTaskCount];
+    var activeTaskCount = 0;
+    var nextTaskIndex = 0;
+    var completedTaskCount = 0;
+    var success = false;
+
+    try {
+      while (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
+        tasks.set(
+            nextTaskIndex, startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
+        nextTaskIndex++;
+        activeTaskCount++;
+      }
+
+      while (completedTaskCount < totalTaskCount) {
+        final var completedTaskIndex = takeFromQueue(completionQueue);
+        final var task = tasks.get(completedTaskIndex);
+        joinTask(task);
+        if (task.error().get() != null) {
+          final var cause = task.error().get();
+          results[completedTaskIndex] =
+              Either.fail(
+                  cause instanceof RuntimeException re && re.getCause() != null
+                      ? re.getCause()
+                      : cause);
+        } else {
+          results[completedTaskIndex] = Either.ok(task.result().get());
+        }
+        completedTaskCount++;
+        activeTaskCount--;
+
+        if (nextTaskIndex < totalTaskCount) {
+          tasks.set(
+              nextTaskIndex,
+              startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
+          nextTaskIndex++;
+          activeTaskCount++;
+        }
+      }
+
+      success = true;
+      return List.of(results);
+    } finally {
+      if (!success) {
+        cancelAndJoinAll(tasks);
+      }
+    }
+  }
+
+  /**
+   * Like {@link #asMap}, but collects per-key results instead of failing fast. Every task runs to
+   * completion. The returned map is keyed by {@code keys} with iteration order preserved.
+   */
+  public <K, V> Map<K, Either<V, Throwable>> toEitherMap(
+      Collection<K> keys, Function<K, V> valueMapper) {
+    Objects.requireNonNull(keys, "keys");
+    Objects.requireNonNull(valueMapper, "valueMapper");
+
+    final var keyList = List.copyOf(keys);
+    final var eithers = toEither(keyList, valueMapper::apply);
+
+    final var result = new LinkedHashMap<K, Either<V, Throwable>>();
+    for (int i = 0; i < keyList.size(); i++) {
+      result.put(keyList.get(i), eithers.get(i));
+    }
+    return Collections.unmodifiableMap(result);
+  }
+
+  // ── Internal task management ──
+
+  private record VirtualTask<R>(
+      Thread thread, AtomicReference<R> result, AtomicReference<Throwable> error) {}
+
+  private <T, R> VirtualTask<R> startTask(
+      int index, T item, Function<T, R> fn, LinkedBlockingQueue<Integer> completionQueue) {
+    final var result = new AtomicReference<R>();
+    final var error = new AtomicReference<Throwable>();
+
+    Supplier<R> task = () -> fn.apply(item);
+    if (timeout != null) {
+      task = timedSupplier(task);
+    }
+    final var finalTask = task;
+
+    final var callable = CallableContext.wrap((Callable<R>) finalTask::get, propagators);
+    final var thread =
+        Thread.startVirtualThread(
+            () -> {
+              try {
+                result.set(callable.call());
+              } catch (Exception e) {
+                error.set(e);
+              } finally {
+                completionQueue.add(index);
+              }
+            });
+
+    return new VirtualTask<>(thread, result, error);
+  }
+
+  private static int takeFromQueue(LinkedBlockingQueue<Integer> queue) {
+    try {
+      return queue.take();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
+    }
+  }
+
+  private <R> void joinTask(VirtualTask<R> task) {
+    try {
+      task.thread().join();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
+    }
+  }
+
+  private <R> void cancelAndJoinAll(List<VirtualTask<R>> tasks) {
+    for (final var task : tasks) {
+      if (task != null) {
+        task.thread().interrupt();
+      }
+    }
+    var wasInterrupted = false;
+    for (final var task : tasks) {
+      if (task != null) {
+        while (true) {
+          try {
+            task.thread().join();
+            break;
+          } catch (InterruptedException e) {
+            wasInterrupted = true;
+          }
+        }
+      }
+    }
+    if (wasInterrupted) {
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  private static RuntimeException wrapIfNeeded(Throwable t) {
+    if (t instanceof RuntimeException re) {
+      return re;
+    }
+    return new RuntimeException(t);
   }
 
   private <T> Supplier<T> timedSupplier(Supplier<T> task) {
@@ -97,7 +354,6 @@ public final class Parallel {
                     taskThread.interrupt();
                   }
                 } catch (InterruptedException ignored) {
-                  // Timer cancelled — task completed in time
                 }
               });
       try {
@@ -107,99 +363,5 @@ public final class Parallel {
         timer.interrupt();
       }
     };
-  }
-
-  private <T> Supplier<T> boundedSupplier(Supplier<T> task) {
-    return () -> {
-      semaphore.acquireUninterruptibly();
-      try {
-        return task.get();
-      } finally {
-        semaphore.release();
-      }
-    };
-  }
-
-  /**
-   * Applies {@code fn} to each element on virtual threads with context propagation, returning
-   * results in input order. Blocks until all tasks complete.
-   */
-  public <T, R> List<R> map(List<T> items, Function<T, R> fn) {
-    Objects.requireNonNull(items, "items");
-    Objects.requireNonNull(fn, "fn");
-
-    final var suppliers = items.stream().map(item -> async(() -> fn.apply(item))).toList();
-
-    return suppliers.stream().map(Supplier::get).toList();
-  }
-
-  /**
-   * Computes a value for each key on virtual threads with context propagation, returning a map
-   * preserving key iteration order. Blocks until all tasks complete.
-   */
-  public <K, V> Map<K, V> asMap(Collection<K> keys, Function<K, V> valueMapper) {
-    Objects.requireNonNull(keys, "keys");
-    Objects.requireNonNull(valueMapper, "valueMapper");
-
-    final var entries =
-        keys.stream().map(key -> Map.entry(key, async(() -> valueMapper.apply(key)))).toList();
-
-    final var result = new LinkedHashMap<K, V>();
-    for (var entry : entries) {
-      result.put(entry.getKey(), entry.getValue().get());
-    }
-    return result;
-  }
-
-  /**
-   * Like {@link #map}, but collects per-item results instead of failing fast. Every task runs to
-   * completion. The returned list matches {@code items} in order; each element is either {@link
-   * Either#ok(Object)} or {@link Either#fail(Object)}. The cause is unwrapped from {@link
-   * RuntimeException} when present.
-   */
-  public <T, R> List<Either<R, Throwable>> toEither(List<T> items, Function<T, R> fn) {
-    Objects.requireNonNull(items, "items");
-    Objects.requireNonNull(fn, "fn");
-
-    final var suppliers = items.stream().map(item -> async(() -> fn.apply(item))).toList();
-
-    final var results = new ArrayList<Either<R, Throwable>>(suppliers.size());
-
-    for (final var supplier : suppliers) {
-      try {
-        results.add(Either.ok(supplier.get()));
-      } catch (final RuntimeException e) {
-        results.add(Either.fail(e.getCause() != null ? e.getCause() : e));
-      }
-    }
-
-    return List.copyOf(results);
-  }
-
-  /**
-   * Like {@link #asMap}, but collects per-key results instead of failing fast. Every task runs to
-   * completion. The returned map is keyed by {@code keys} with iteration order preserved; each
-   * value is either {@link Either#ok(Object)} or {@link Either#fail(Object)}. The cause is
-   * unwrapped from {@link RuntimeException} when present.
-   */
-  public <K, V> Map<K, Either<V, Throwable>> toEitherMap(
-      Collection<K> keys, Function<K, V> valueMapper) {
-    Objects.requireNonNull(keys, "keys");
-    Objects.requireNonNull(valueMapper, "valueMapper");
-
-    final var entries =
-        keys.stream().map(key -> Map.entry(key, async(() -> valueMapper.apply(key)))).toList();
-
-    final var result = new LinkedHashMap<K, Either<V, Throwable>>();
-
-    for (final var entry : entries) {
-      try {
-        result.put(entry.getKey(), Either.ok(entry.getValue().get()));
-      } catch (final RuntimeException e) {
-        result.put(entry.getKey(), Either.fail(e.getCause() != null ? e.getCause() : e));
-      }
-    }
-
-    return Collections.unmodifiableMap(new LinkedHashMap<>(result));
   }
 }
