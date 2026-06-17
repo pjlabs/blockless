@@ -1,6 +1,7 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -151,6 +152,15 @@ class ParallelTest {
   @Test
   void mapHandlesEmptyList() {
     assertEquals(List.of(), parallel.map(List.of(), i -> i));
+  }
+
+  @Test
+  void mapAllowsNullResults() {
+    final var results = parallel.map(List.of(1, 2, 3), i -> i == 2 ? null : i);
+    assertEquals(3, results.size());
+    assertEquals(1, results.get(0));
+    assertNull(results.get(1));
+    assertEquals(3, results.get(2));
   }
 
   @Test

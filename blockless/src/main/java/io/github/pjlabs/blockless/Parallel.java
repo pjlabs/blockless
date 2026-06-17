@@ -2,6 +2,7 @@ package io.github.pjlabs.blockless;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -149,7 +150,7 @@ public final class Parallel {
       }
 
       success = true;
-      return List.of(results);
+      return Collections.unmodifiableList(Arrays.asList(results));
     } finally {
       if (!success) {
         cancelAndJoinAll(tasks);
@@ -233,7 +234,7 @@ public final class Parallel {
       }
 
       success = true;
-      return List.of(results);
+      return Collections.unmodifiableList(Arrays.asList(results));
     } finally {
       if (!success) {
         cancelAndJoinAll(tasks);
