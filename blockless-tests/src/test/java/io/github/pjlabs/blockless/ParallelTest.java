@@ -1,6 +1,7 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -8,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.github.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -508,6 +510,83 @@ class ParallelTest {
     }
 
     @Test
+    void taskIgnoringInterruptFailsWithTimeout() {
+      final var timedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(50));
+      final var results =
+          timedParallel.toEither(
+              List.of(1),
+              i -> {
+                final var end = System.nanoTime() + Duration.ofMillis(300).toNanos();
+                while (System.nanoTime() < end) {
+                  // busy-wait without checking interruption
+                }
+                return "done";
+              });
+      assertTrue(results.getFirst().isFailed(), "late result must be discarded");
+      assertInstanceOf(TimeoutException.class, results.getFirst().failure());
+    }
+
+    @Test
+    void taskThrowingOnInterruptFailsWithTimeout() {
+      final var timedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(50));
+      final var results =
+          timedParallel.toEither(
+              List.of(1),
+              i -> {
+                try {
+                  Thread.sleep(5000);
+                  return "done";
+                } catch (final InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                  throw new RuntimeException(e);
+                }
+              });
+      final var failure = results.getFirst().failure();
+      assertInstanceOf(TimeoutException.class, failure);
+      assertInstanceOf(RuntimeException.class, failure.getSuppressed()[0]);
+      assertInstanceOf(InterruptedException.class, failure.getSuppressed()[0].getCause());
+    }
+
+    @Test
+    void mapThrowsTimeoutForTaskIgnoringInterrupt() {
+      final var timedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(50));
+      final var thrown =
+          assertThrows(
+              RuntimeException.class,
+              () ->
+                  timedParallel.map(
+                      List.of(1),
+                      i -> {
+                        final var end = System.nanoTime() + Duration.ofMillis(300).toNanos();
+                        while (System.nanoTime() < end) {
+                          // busy-wait without checking interruption
+                        }
+                        return i;
+                      }));
+      assertInstanceOf(TimeoutException.class, thrown.getCause());
+    }
+
+    @Test
+    void asyncThrowsTimeoutForTaskIgnoringInterrupt() {
+      final var timedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(50));
+      final var supplier =
+          timedParallel.async(
+              () -> {
+                final var end = System.nanoTime() + Duration.ofMillis(300).toNanos();
+                while (System.nanoTime() < end) {
+                  // busy-wait without checking interruption
+                }
+                return "done";
+              });
+      final var thrown = assertThrows(RuntimeException.class, supplier::get);
+      assertTrue(hasCause(thrown, TimeoutException.class), "expected TimeoutException in chain");
+    }
+
+    @Test
     void fastTasksUnaffected() {
       final var timedParallel =
           Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofSeconds(1));
@@ -538,6 +617,15 @@ class ParallelTest {
           IllegalArgumentException.class,
           () ->
               Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(-1)));
+    }
+
+    private static boolean hasCause(Throwable thrown, Class<? extends Throwable> type) {
+      for (var current = thrown; current != null; current = current.getCause()) {
+        if (type.isInstance(current)) {
+          return true;
+        }
+      }
+      return false;
     }
   }
 }

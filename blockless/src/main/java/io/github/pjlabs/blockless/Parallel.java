@@ -68,8 +68,12 @@ public final class Parallel {
 
   /**
    * Returns a new {@link Parallel} with a per-task timeout. If a task does not complete within the
-   * duration, its thread is interrupted and a {@link TimeoutException} is thrown (wrapped in {@link
-   * RuntimeException}).
+   * duration, its thread is interrupted and the task fails with a {@link TimeoutException} (wrapped
+   * in {@link RuntimeException}) — even if it ignores the interrupt and later returns a value or
+   * throws something else (attached as a suppressed exception).
+   *
+   * <p>The failure is reported once the task's thread exits; threads are never abandoned. A task
+   * that never checks interruption therefore still delays the caller until it finishes.
    */
   public Parallel withTimeout(Duration timeout) {
     Objects.requireNonNull(timeout, "timeout");
@@ -342,27 +346,50 @@ public final class Parallel {
     return new RuntimeException(t);
   }
 
+  /**
+   * Wraps {@code task} so that exceeding {@link #timeout} always fails with {@link
+   * TimeoutException}, regardless of how the task reacts to interruption. The timer and the task
+   * race on {@code finished}: whoever flips it first decides the outcome, so a result or exception
+   * produced after the deadline is discarded.
+   */
   private <T> Supplier<T> timedSupplier(Supplier<T> task) {
     return () -> {
       final var taskThread = Thread.currentThread();
-      final var done = new AtomicBoolean(false);
+      final var finished = new AtomicBoolean(false);
       final var timer =
           Thread.startVirtualThread(
               () -> {
                 try {
                   Thread.sleep(timeout);
-                  if (!done.get()) {
+                  if (finished.compareAndSet(false, true)) {
                     taskThread.interrupt();
                   }
                 } catch (InterruptedException ignored) {
                 }
               });
+      final T result;
       try {
-        return task.get();
+        result = task.get();
+      } catch (RuntimeException | Error e) {
+        if (finished.compareAndSet(false, true)) {
+          throw e;
+        }
+        final var timeoutError = timedOut();
+        timeoutError.getCause().addSuppressed(e);
+        throw timeoutError;
       } finally {
-        done.set(true);
         timer.interrupt();
       }
+      if (!finished.compareAndSet(false, true)) {
+        throw timedOut();
+      }
+      return result;
     };
+  }
+
+  /** Clears the interrupt raised by the timer and builds the timeout failure. */
+  private RuntimeException timedOut() {
+    Thread.interrupted();
+    return new RuntimeException(new TimeoutException("task exceeded timeout of " + timeout));
   }
 }
