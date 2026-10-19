@@ -11,6 +11,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -37,6 +39,12 @@ public final class Parallel {
   private final List<ContextPropagator> propagators;
   private final int maxConcurrency;
   private final Duration timeout;
+
+  /**
+   * Fires timeouts on a platform thread. A virtual-thread timer could be starved indefinitely when
+   * busy tasks occupy every carrier, since virtual threads are not preempted.
+   */
+  private static final ScheduledThreadPoolExecutor TIMEOUT_SCHEDULER = timeoutScheduler();
 
   private Parallel(List<ContextPropagator> propagators, int maxConcurrency, Duration timeout) {
     this.propagators = List.copyOf(propagators);
@@ -346,50 +354,66 @@ public final class Parallel {
     return new RuntimeException(t);
   }
 
+  private static ScheduledThreadPoolExecutor timeoutScheduler() {
+    final var scheduler =
+        new ScheduledThreadPoolExecutor(
+            1, Thread.ofPlatform().daemon().name("blockless-timeout").factory());
+    scheduler.setRemoveOnCancelPolicy(true);
+    return scheduler;
+  }
+
   /**
    * Wraps {@code task} so that exceeding {@link #timeout} always fails with {@link
-   * TimeoutException}, regardless of how the task reacts to interruption. The timer and the task
-   * race on {@code finished}: whoever flips it first decides the outcome, so a result or exception
-   * produced after the deadline is discarded.
+   * TimeoutException}, regardless of how the task reacts to interruption. A result or exception
+   * produced after the deadline is discarded, even if the timer has not fired yet.
    */
   private <T> Supplier<T> timedSupplier(Supplier<T> task) {
     return () -> {
       final var taskThread = Thread.currentThread();
       final var finished = new AtomicBoolean(false);
+      final var deadline = System.nanoTime() + timeout.toNanos();
       final var timer =
-          Thread.startVirtualThread(
+          TIMEOUT_SCHEDULER.schedule(
               () -> {
-                try {
-                  Thread.sleep(timeout);
-                  if (finished.compareAndSet(false, true)) {
-                    taskThread.interrupt();
-                  }
-                } catch (InterruptedException ignored) {
+                if (finished.compareAndSet(false, true)) {
+                  taskThread.interrupt();
                 }
-              });
+              },
+              timeout.toNanos(),
+              TimeUnit.NANOSECONDS);
       final T result;
       try {
         result = task.get();
       } catch (RuntimeException | Error e) {
-        if (finished.compareAndSet(false, true)) {
+        if (finishedInTime(finished, deadline)) {
           throw e;
         }
         final var timeoutError = timedOut();
         timeoutError.getCause().addSuppressed(e);
         throw timeoutError;
       } finally {
-        timer.interrupt();
+        timer.cancel(false);
       }
-      if (!finished.compareAndSet(false, true)) {
+      if (!finishedInTime(finished, deadline)) {
         throw timedOut();
       }
       return result;
     };
   }
 
-  /** Clears the interrupt raised by the timer and builds the timeout failure. */
+  /**
+   * Marks the task finished and reports whether it beat the deadline. If the timer got there first,
+   * clears the interrupt it raised.
+   */
+  private static boolean finishedInTime(AtomicBoolean finished, long deadline) {
+    if (!finished.compareAndSet(false, true)) {
+      Thread.interrupted();
+      return false;
+    }
+    return System.nanoTime() - deadline < 0;
+  }
+
   private RuntimeException timedOut() {
-    Thread.interrupted();
     return new RuntimeException(new TimeoutException("task exceeded timeout of " + timeout));
   }
 }

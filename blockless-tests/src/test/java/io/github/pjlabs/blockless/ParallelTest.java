@@ -587,6 +587,28 @@ class ParallelTest {
     }
 
     @Test
+    void timeoutWinsWhenBusyTasksOccupyEveryCarrier() {
+      // Virtual threads are not preempted: one busy task per carrier leaves no carrier free for a
+      // virtual-thread timer, so the timeout must not depend on the virtual-thread scheduler.
+      final var carriers = Runtime.getRuntime().availableProcessors();
+      final var timedParallel =
+          Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(50));
+      final var results =
+          timedParallel.toEither(
+              IntStream.range(0, carriers).boxed().toList(),
+              i -> {
+                final var end = System.nanoTime() + Duration.ofMillis(300).toNanos();
+                while (System.nanoTime() < end) {
+                  // busy-wait without checking interruption
+                }
+                return i;
+              });
+      for (final var result : results) {
+        assertInstanceOf(TimeoutException.class, result.failure());
+      }
+    }
+
+    @Test
     void fastTasksUnaffected() {
       final var timedParallel =
           Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofSeconds(1));
