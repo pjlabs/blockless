@@ -1,6 +1,7 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -12,6 +13,8 @@ import io.github.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -484,6 +487,182 @@ class ParallelTest {
 
   @Nested
   class Timeout {
+
+    @Test
+    void interruptingAsyncWaiterInterruptsWorker() throws Exception {
+      final var started = new CountDownLatch(1);
+      final var interrupted = new CountDownLatch(1);
+      final var release = new CountDownLatch(1);
+      final var finished = new CountDownLatch(1);
+      final var supplier =
+          parallel
+              .withTimeout(Duration.ofSeconds(30))
+              .async(
+                  () -> {
+                    started.countDown();
+                    try {
+                      release.await();
+                      return "done";
+                    } catch (InterruptedException e) {
+                      interrupted.countDown();
+                      Thread.currentThread().interrupt();
+                      throw new RuntimeException(e);
+                    } finally {
+                      finished.countDown();
+                    }
+                  });
+      final var waiting = new FutureTask<>(supplier::get);
+      final var caller = Thread.startVirtualThread(waiting);
+      try {
+        assertTrue(started.await(3, TimeUnit.SECONDS));
+        caller.interrupt();
+        final var failure =
+            assertThrows(ExecutionException.class, () -> waiting.get(3, TimeUnit.SECONDS));
+        assertInstanceOf(InterruptedException.class, failure.getCause().getCause());
+        assertTrue(interrupted.await(3, TimeUnit.SECONDS));
+      } finally {
+        release.countDown();
+        caller.interrupt();
+        caller.join(3000);
+        assertFalse(caller.isAlive());
+        assertTrue(finished.await(3, TimeUnit.SECONDS));
+      }
+    }
+
+    @Test
+    void mapFailureInterruptsSiblingWorkerWithTimeoutEnabled() throws InterruptedException {
+      final var siblingStarted = new CountDownLatch(1);
+      final var siblingInterrupted = new CountDownLatch(1);
+      final var release = new CountDownLatch(1);
+      final var siblingFinished = new CountDownLatch(1);
+      final var original = new IllegalArgumentException("failed");
+      try {
+        final var failure =
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(3),
+                () ->
+                    assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                            parallel
+                                .withMaxConcurrency(2)
+                                .withTimeout(Duration.ofSeconds(30))
+                                .map(
+                                    List.of(1, 2),
+                                    i -> {
+                                      if (i == 1) {
+                                        try {
+                                          if (!siblingStarted.await(3, TimeUnit.SECONDS)) {
+                                            throw new IllegalStateException(
+                                                "sibling did not start");
+                                          }
+                                        } catch (InterruptedException e) {
+                                          throw new RuntimeException(e);
+                                        }
+                                        throw original;
+                                      }
+                                      siblingStarted.countDown();
+                                      try {
+                                        release.await();
+                                        return i;
+                                      } catch (InterruptedException e) {
+                                        siblingInterrupted.countDown();
+                                        Thread.currentThread().interrupt();
+                                        throw new RuntimeException(e);
+                                      } finally {
+                                        siblingFinished.countDown();
+                                      }
+                                    })));
+        assertSame(original, failure);
+        assertTrue(
+            siblingInterrupted.await(3, TimeUnit.SECONDS),
+            "map failure must interrupt the actual sibling worker, not just a waiter");
+      } finally {
+        release.countDown();
+        assertTrue(siblingFinished.await(3, TimeUnit.SECONDS));
+      }
+    }
+
+    @Test
+    void timedOutWorkerRetainsSlotUntilItExits() throws Exception {
+      final var release = new CountDownLatch(1);
+      final var interrupted = new CountDownLatch(1);
+      final var nextStarted = new CountDownLatch(1);
+      final var active = new AtomicInteger();
+      final var maxActive = new AtomicInteger();
+      final var batch =
+          new FutureTask<>(
+              () ->
+                  parallel
+                      .withMaxConcurrency(1)
+                      .withTimeout(Duration.ofMillis(100))
+                      .toEither(
+                          List.of(1, 2),
+                          i -> {
+                            maxActive.accumulateAndGet(active.incrementAndGet(), Math::max);
+                            try {
+                              if (i == 1) {
+                                return waitIgnoringInterrupts(release, interrupted);
+                              }
+                              nextStarted.countDown();
+                              return "next";
+                            } finally {
+                              active.decrementAndGet();
+                            }
+                          }));
+      final var caller = Thread.startVirtualThread(batch);
+      try {
+        assertTrue(interrupted.await(3, TimeUnit.SECONDS));
+        assertFalse(
+            nextStarted.await(200, TimeUnit.MILLISECONDS),
+            "timeout must not free the worker's concurrency slot");
+        assertFalse(batch.isDone(), "queued items still need a worker slot");
+        release.countDown();
+
+        final var results = batch.get(3, TimeUnit.SECONDS);
+        assertInstanceOf(TimeoutException.class, results.get(0).failure());
+        assertEquals("next", results.get(1).result());
+        assertEquals(1, maxActive.get());
+      } finally {
+        release.countDown();
+        caller.interrupt();
+        caller.join(3000);
+        assertFalse(caller.isAlive());
+      }
+    }
+
+    @Test
+    void timedAsyncCapturesAndRestoresContextOnce() {
+      final var captures = new AtomicInteger();
+      final var attaches = new AtomicInteger();
+      final var restores = new AtomicInteger();
+      final var propagator =
+          new ContextPropagator() {
+            @Override
+            public Object capture() {
+              captures.incrementAndGet();
+              return null;
+            }
+
+            @Override
+            public Object attach(Object captured) {
+              attaches.incrementAndGet();
+              return null;
+            }
+
+            @Override
+            public void restore(Object previous) {
+              restores.incrementAndGet();
+            }
+          };
+
+      assertEquals(
+          "ok",
+          Parallel.create(propagator).withTimeout(Duration.ofSeconds(5)).async(() -> "ok").get());
+      assertEquals(1, captures.get());
+      assertEquals(1, attaches.get());
+      assertEquals(1, restores.get());
+    }
 
     @Test
     void asyncTimesOutEvenWhenTaskIgnoresInterruption() throws InterruptedException {

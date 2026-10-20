@@ -9,12 +9,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -25,8 +24,8 @@ import java.util.function.Supplier;
  * captured at call time and propagated using the configured {@link ContextPropagator} instances.
  *
  * <p>When {@link #withMaxConcurrency(int)} is set, {@link #map} and {@link #toEither} use a sliding
- * window — at most N virtual threads are alive at any time. Tasks are collected in completion order
- * to avoid head-of-line blocking, but results are always returned in input order.
+ * window — at most N worker threads are alive per batch. Tasks are collected in completion order to
+ * avoid head-of-line blocking, but results are always returned in input order.
  *
  * <pre>{@code
  * var parallel = Parallel.create(new Slf4jMdcContextPropagator());
@@ -58,7 +57,7 @@ public final class Parallel {
   /**
    * Returns a new {@link Parallel} with the same propagators but limited to {@code maxConcurrency}
    * concurrent tasks. In {@link #map} and {@link #toEither}, this controls the sliding window size
-   * — at most N virtual threads are alive at any time.
+   * — at most N worker threads are alive per batch.
    */
   public Parallel withMaxConcurrency(int maxConcurrency) {
     if (maxConcurrency < 1) {
@@ -69,11 +68,13 @@ public final class Parallel {
 
   /**
    * Returns a new {@link Parallel} with a per-task timeout. If a task does not complete within the
-   * duration, its thread is interrupted and a {@link TimeoutException} is thrown (wrapped in {@link
-   * RuntimeException}).
+   * duration, its worker is interrupted and its result fails with {@link TimeoutException}. {@link
+   * #map} and {@link #async} wrap it in {@link RuntimeException}; {@link #toEither} collects it as
+   * a failed {@link Either}.
    *
    * <p>Timeouts stop waiting for the result, even if the task ignores interruption. Such tasks may
-   * continue running in the background, including beyond the configured concurrency limit.
+   * continue running in the background. In bounded batches they retain their concurrency slot until
+   * they exit, so queued tasks may still delay completion of the batch.
    */
   public Parallel withTimeout(Duration timeout) {
     Objects.requireNonNull(timeout, "timeout");
@@ -92,20 +93,16 @@ public final class Parallel {
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
-    Supplier<T> wrapped = task;
-    if (timeout != null) {
-      wrapped = timedSupplier(wrapped);
-    }
-    return Blockless.supplier(CallableContext.wrap(wrapped::get, propagators));
+    return startTask(task, (value, failure) -> {}, () -> {}).supplier();
   }
 
   /**
    * Applies {@code fn} to each element on virtual threads with context propagation, returning
    * results in input order. Blocks until all tasks complete.
    *
-   * <p>With {@link #withMaxConcurrency(int)}, uses a sliding window — at most N virtual threads are
-   * alive at any time. Tasks are collected in completion order to maximize throughput. On failure,
-   * remaining in-progress tasks are cancelled.
+   * <p>With {@link #withMaxConcurrency(int)}, uses a sliding window — at most N worker threads are
+   * alive per batch. Tasks are collected in completion order to maximize throughput. On failure,
+   * remaining in-progress tasks are interrupted without waiting for them to exit.
    */
   @SuppressWarnings("unchecked")
   public <T, R> List<R> map(List<T> items, Function<T, R> fn) {
@@ -117,8 +114,8 @@ public final class Parallel {
 
     final var totalTaskCount = items.size();
     final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
-    final var completionQueue = new LinkedBlockingQueue<Integer>();
-    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(totalTaskCount, null));
+    final var completionQueue = new LinkedBlockingQueue<TaskEvent<R>>();
+    final var tasks = new ArrayList<TaskHandle<R>>(Collections.nCopies(totalTaskCount, null));
     final var results = (R[]) new Object[totalTaskCount];
     var activeTaskCount = 0;
     var nextTaskIndex = 0;
@@ -134,17 +131,19 @@ public final class Parallel {
       }
 
       while (completedTaskCount < totalTaskCount) {
-        final var completedTaskIndex = takeFromQueue(completionQueue);
-        final var task = tasks.get(completedTaskIndex);
-        joinTask(task);
-        if (task.error().get() != null) {
-          throw wrapIfNeeded(task.error().get());
+        final var event = takeFromQueue(completionQueue);
+        if (event.workerExited()) {
+          joinTask(tasks.get(event.index()));
+          activeTaskCount--;
+        } else {
+          if (event.failure() != null) {
+            throw wrapIfNeeded(event.failure());
+          }
+          results[event.index()] = event.result();
+          completedTaskCount++;
         }
-        results[completedTaskIndex] = task.result().get();
-        completedTaskCount++;
-        activeTaskCount--;
 
-        if (nextTaskIndex < totalTaskCount) {
+        if (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
           tasks.set(
               nextTaskIndex,
               startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
@@ -157,7 +156,7 @@ public final class Parallel {
       return Collections.unmodifiableList(Arrays.asList(results));
     } finally {
       if (!success) {
-        cancelAndJoinAll(tasks);
+        cancelAll(tasks);
       }
     }
   }
@@ -181,9 +180,10 @@ public final class Parallel {
   }
 
   /**
-   * Like {@link #map}, but collects per-item results instead of failing fast. Every task runs to
-   * completion — no cancellation on failure. The returned list matches {@code items} in order; each
-   * element is either {@link Either#ok(Object)} or {@link Either#fail(Object)}.
+   * Like {@link #map}, but collects per-item results instead of failing fast. Every item produces a
+   * result or timeout — no cancellation of other tasks on failure. The returned list matches {@code
+   * items} in order; each element is either {@link Either#ok(Object)} or {@link
+   * Either#fail(Object)}.
    */
   @SuppressWarnings("unchecked")
   public <T, R> List<Either<R, Throwable>> toEither(List<T> items, Function<T, R> fn) {
@@ -195,8 +195,8 @@ public final class Parallel {
 
     final var totalTaskCount = items.size();
     final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
-    final var completionQueue = new LinkedBlockingQueue<Integer>();
-    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(totalTaskCount, null));
+    final var completionQueue = new LinkedBlockingQueue<TaskEvent<R>>();
+    final var tasks = new ArrayList<TaskHandle<R>>(Collections.nCopies(totalTaskCount, null));
     final var results = (Either<R, Throwable>[]) new Either[totalTaskCount];
     var activeTaskCount = 0;
     var nextTaskIndex = 0;
@@ -212,23 +212,23 @@ public final class Parallel {
       }
 
       while (completedTaskCount < totalTaskCount) {
-        final var completedTaskIndex = takeFromQueue(completionQueue);
-        final var task = tasks.get(completedTaskIndex);
-        joinTask(task);
-        if (task.error().get() != null) {
-          final var cause = task.error().get();
-          results[completedTaskIndex] =
-              Either.fail(
-                  cause instanceof RuntimeException re && re.getCause() != null
-                      ? re.getCause()
-                      : cause);
+        final var event = takeFromQueue(completionQueue);
+        if (event.workerExited()) {
+          joinTask(tasks.get(event.index()));
+          activeTaskCount--;
         } else {
-          results[completedTaskIndex] = Either.ok(task.result().get());
+          final var cause = event.failure();
+          results[event.index()] =
+              cause == null
+                  ? Either.ok(event.result())
+                  : Either.fail(
+                      cause instanceof RuntimeException re && re.getCause() != null
+                          ? re.getCause()
+                          : cause);
+          completedTaskCount++;
         }
-        completedTaskCount++;
-        activeTaskCount--;
 
-        if (nextTaskIndex < totalTaskCount) {
+        if (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
           tasks.set(
               nextTaskIndex,
               startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
@@ -241,14 +241,14 @@ public final class Parallel {
       return Collections.unmodifiableList(Arrays.asList(results));
     } finally {
       if (!success) {
-        cancelAndJoinAll(tasks);
+        cancelAll(tasks);
       }
     }
   }
 
   /**
-   * Like {@link #asMap}, but collects per-key results instead of failing fast. Every task runs to
-   * completion. The returned map is keyed by {@code keys} with iteration order preserved.
+   * Like {@link #asMap}, but collects per-key results instead of failing fast. Every item produces
+   * a result or timeout. The returned map is keyed by {@code keys} with iteration order preserved.
    */
   public <K, V> Map<K, Either<V, Throwable>> toEitherMap(
       Collection<K> keys, Function<K, V> valueMapper) {
@@ -267,37 +267,71 @@ public final class Parallel {
 
   // ── Internal task management ──
 
-  private record VirtualTask<R>(
-      Thread thread, AtomicReference<R> result, AtomicReference<Throwable> error) {}
+  // A timeout can produce a result before worker exit; only exit releases a batch slot.
+  private record TaskEvent<R>(int index, boolean workerExited, R result, Throwable failure) {}
 
-  private <T, R> VirtualTask<R> startTask(
-      int index, T item, Function<T, R> fn, LinkedBlockingQueue<Integer> completionQueue) {
-    final var result = new AtomicReference<R>();
-    final var error = new AtomicReference<Throwable>();
-
-    Supplier<R> task = () -> fn.apply(item);
-    if (timeout != null) {
-      task = timedSupplier(task);
+  private record TaskHandle<R>(Thread worker, CompletableFuture<R> result) {
+    void cancel() {
+      worker.interrupt();
+      result.cancel(false);
     }
-    final var finalTask = task;
 
-    final var callable = CallableContext.wrap((Callable<R>) finalTask::get, propagators);
-    final var thread =
-        Thread.startVirtualThread(
-            () -> {
-              try {
-                result.set(callable.call());
-              } catch (Exception e) {
-                error.set(e);
-              } finally {
-                completionQueue.add(index);
-              }
-            });
-
-    return new VirtualTask<>(thread, result, error);
+    Supplier<R> supplier() {
+      final var supplier = Blockless.supplier(result);
+      return () -> {
+        try {
+          return supplier.get();
+        } finally {
+          if (Thread.currentThread().isInterrupted()) {
+            cancel();
+          }
+        }
+      };
+    }
   }
 
-  private static int takeFromQueue(LinkedBlockingQueue<Integer> queue) {
+  private <T, R> TaskHandle<R> startTask(
+      int index, T item, Function<T, R> fn, LinkedBlockingQueue<TaskEvent<R>> completionQueue) {
+    return startTask(
+        () -> fn.apply(item),
+        (value, failure) -> completionQueue.add(new TaskEvent<>(index, false, value, failure)),
+        () -> completionQueue.add(new TaskEvent<>(index, true, null, null)));
+  }
+
+  private <T> TaskHandle<T> startTask(
+      Supplier<T> task, BiConsumer<T, Throwable> onResult, Runnable onWorkerExit) {
+    final var timeoutNanos = timeout == null ? 0 : timeout.toNanos();
+    final var result = new CompletableFuture<T>();
+    final var callable = CallableContext.<T>wrap(task::get, propagators);
+    final var worker =
+        Thread.ofVirtual()
+            .unstarted(
+                () -> {
+                  try {
+                    result.complete(callable.call());
+                  } catch (Throwable failure) {
+                    result.completeExceptionally(failure);
+                  } finally {
+                    onWorkerExit.run();
+                  }
+                });
+
+    result.whenComplete(
+        (value, failure) -> {
+          if (failure instanceof TimeoutException) {
+            worker.interrupt();
+          }
+          onResult.accept(value, failure);
+        });
+
+    worker.start();
+    if (timeout != null) {
+      result.orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
+    }
+    return new TaskHandle<>(worker, result);
+  }
+
+  private static <R> TaskEvent<R> takeFromQueue(LinkedBlockingQueue<TaskEvent<R>> queue) {
     try {
       return queue.take();
     } catch (InterruptedException e) {
@@ -306,36 +340,20 @@ public final class Parallel {
     }
   }
 
-  private <R> void joinTask(VirtualTask<R> task) {
+  private <R> void joinTask(TaskHandle<R> task) {
     try {
-      task.thread().join();
+      task.worker().join();
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new RuntimeException(e);
     }
   }
 
-  private <R> void cancelAndJoinAll(List<VirtualTask<R>> tasks) {
+  private <R> void cancelAll(List<TaskHandle<R>> tasks) {
     for (final var task : tasks) {
       if (task != null) {
-        task.thread().interrupt();
+        task.cancel();
       }
-    }
-    var wasInterrupted = false;
-    for (final var task : tasks) {
-      if (task != null) {
-        while (true) {
-          try {
-            task.thread().join();
-            break;
-          } catch (InterruptedException e) {
-            wasInterrupted = true;
-          }
-        }
-      }
-    }
-    if (wasInterrupted) {
-      Thread.currentThread().interrupt();
     }
   }
 
@@ -344,28 +362,5 @@ public final class Parallel {
       return re;
     }
     return new RuntimeException(t);
-  }
-
-  private <T> Supplier<T> timedSupplier(Supplier<T> task) {
-    final var result = new CompletableFuture<T>();
-    final var callable = CallableContext.<T>wrap(task::get, propagators);
-    final var worker =
-        Thread.startVirtualThread(
-            () -> {
-              try {
-                result.complete(callable.call());
-              } catch (Throwable failure) {
-                result.completeExceptionally(failure);
-              }
-            });
-
-    result.whenComplete(
-        (value, failure) -> {
-          if (failure instanceof TimeoutException) {
-            worker.interrupt();
-          }
-        });
-
-    return Blockless.supplier(result.orTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS));
   }
 }
