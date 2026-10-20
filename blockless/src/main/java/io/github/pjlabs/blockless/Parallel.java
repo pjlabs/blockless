@@ -10,9 +10,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -70,6 +71,9 @@ public final class Parallel {
    * Returns a new {@link Parallel} with a per-task timeout. If a task does not complete within the
    * duration, its thread is interrupted and a {@link TimeoutException} is thrown (wrapped in {@link
    * RuntimeException}).
+   *
+   * <p>Timeouts stop waiting for the result, even if the task ignores interruption. Such tasks may
+   * continue running in the background, including beyond the configured concurrency limit.
    */
   public Parallel withTimeout(Duration timeout) {
     Objects.requireNonNull(timeout, "timeout");
@@ -343,26 +347,25 @@ public final class Parallel {
   }
 
   private <T> Supplier<T> timedSupplier(Supplier<T> task) {
-    return () -> {
-      final var taskThread = Thread.currentThread();
-      final var done = new AtomicBoolean(false);
-      final var timer =
-          Thread.startVirtualThread(
-              () -> {
-                try {
-                  Thread.sleep(timeout);
-                  if (!done.get()) {
-                    taskThread.interrupt();
-                  }
-                } catch (InterruptedException ignored) {
-                }
-              });
-      try {
-        return task.get();
-      } finally {
-        done.set(true);
-        timer.interrupt();
-      }
-    };
+    final var result = new CompletableFuture<T>();
+    final var callable = CallableContext.<T>wrap(task::get, propagators);
+    final var worker =
+        Thread.startVirtualThread(
+            () -> {
+              try {
+                result.complete(callable.call());
+              } catch (Throwable failure) {
+                result.completeExceptionally(failure);
+              }
+            });
+
+    result.whenComplete(
+        (value, failure) -> {
+          if (failure instanceof TimeoutException) {
+            worker.interrupt();
+          }
+        });
+
+    return Blockless.supplier(result.orTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS));
   }
 }

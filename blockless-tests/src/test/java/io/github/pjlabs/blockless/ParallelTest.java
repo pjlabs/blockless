@@ -1,13 +1,19 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
@@ -478,6 +484,123 @@ class ParallelTest {
 
   @Nested
   class Timeout {
+
+    @Test
+    void asyncTimesOutEvenWhenTaskIgnoresInterruption() throws InterruptedException {
+      final var release = new CountDownLatch(1);
+      final var interrupted = new CountDownLatch(1);
+      final var finished = new CountDownLatch(1);
+      final var supplier =
+          parallel
+              .withTimeout(Duration.ofMillis(100))
+              .async(
+                  () -> {
+                    try {
+                      return waitIgnoringInterrupts(release, interrupted);
+                    } finally {
+                      finished.countDown();
+                    }
+                  });
+
+      try {
+        final var failure =
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(3), () -> assertThrows(RuntimeException.class, supplier::get));
+        assertInstanceOf(TimeoutException.class, failure.getCause());
+        assertTrue(interrupted.await(3, TimeUnit.SECONDS));
+        assertEquals(1, finished.getCount(), "caller must return before the task finishes");
+      } finally {
+        release.countDown();
+        assertTrue(finished.await(3, TimeUnit.SECONDS));
+      }
+    }
+
+    @Test
+    void mapTimesOutEvenWhenTaskIgnoresInterruption() {
+      final var release = new CountDownLatch(1);
+      try {
+        final var failure =
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(3),
+                () ->
+                    assertThrows(
+                        RuntimeException.class,
+                        () ->
+                            parallel
+                                .withTimeout(Duration.ofMillis(100))
+                                .map(
+                                    List.of(1),
+                                    i -> waitIgnoringInterrupts(release, new CountDownLatch(1)))));
+        assertInstanceOf(TimeoutException.class, failure.getCause());
+      } finally {
+        release.countDown();
+      }
+    }
+
+    @Test
+    void toEitherCollectsTimeoutAndSuccess() {
+      final var release = new CountDownLatch(1);
+      try {
+        final var results =
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(3),
+                () ->
+                    parallel
+                        .withTimeout(Duration.ofMillis(100))
+                        .toEither(
+                            List.of(1, 2),
+                            i ->
+                                i == 1
+                                    ? waitIgnoringInterrupts(release, new CountDownLatch(1))
+                                    : "ok"));
+        assertInstanceOf(TimeoutException.class, results.get(0).failure());
+        assertEquals("ok", results.get(1).result());
+      } finally {
+        release.countDown();
+      }
+    }
+
+    @Test
+    void asyncPreservesContextAndRunsOnVirtualThread() {
+      MDC.put("traceId", "timed-parent");
+      final var supplier =
+          parallel
+              .withTimeout(Duration.ofSeconds(5))
+              .async(
+                  () -> {
+                    assertTrue(Thread.currentThread().isVirtual());
+                    final var traceId = MDC.get("traceId");
+                    MDC.put("traceId", "timed-child");
+                    return traceId;
+                  });
+
+      assertEquals("timed-parent", supplier.get());
+      assertEquals("timed-parent", MDC.get("traceId"));
+    }
+
+    @Test
+    void preservesTaskFailureBeforeTimeout() {
+      final var original = new IllegalArgumentException("failed");
+      final var supplier =
+          parallel
+              .withTimeout(Duration.ofSeconds(5))
+              .async(
+                  () -> {
+                    throw original;
+                  });
+      assertSame(original, assertThrows(IllegalArgumentException.class, supplier::get));
+    }
+
+    private String waitIgnoringInterrupts(CountDownLatch release, CountDownLatch interrupted) {
+      while (true) {
+        try {
+          release.await();
+          return "late result";
+        } catch (InterruptedException ignored) {
+          interrupted.countDown();
+        }
+      }
+    }
 
     @Test
     void completesWithinTimeout() {
