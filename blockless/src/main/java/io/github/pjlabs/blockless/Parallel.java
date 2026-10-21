@@ -14,6 +14,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -112,53 +113,17 @@ public final class Parallel {
       return List.of();
     }
 
-    final var totalTaskCount = items.size();
-    final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
-    final var completionQueue = new LinkedBlockingQueue<TaskEvent<R>>();
-    final var tasks = new ArrayList<TaskHandle<R>>(Collections.nCopies(totalTaskCount, null));
-    final var results = (R[]) new Object[totalTaskCount];
-    var activeTaskCount = 0;
-    var nextTaskIndex = 0;
-    var completedTaskCount = 0;
-    var success = false;
-
-    try {
-      while (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
-        tasks.set(
-            nextTaskIndex, startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
-        nextTaskIndex++;
-        activeTaskCount++;
-      }
-
-      while (completedTaskCount < totalTaskCount) {
-        final var event = takeFromQueue(completionQueue);
-        if (event.workerExited()) {
-          joinTask(tasks.get(event.index()));
-          activeTaskCount--;
-        } else {
+    final var results = (R[]) new Object[items.size()];
+    runBatch(
+        items,
+        fn,
+        event -> {
           if (event.failure() != null) {
             throw wrapIfNeeded(event.failure());
           }
           results[event.index()] = event.result();
-          completedTaskCount++;
-        }
-
-        if (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
-          tasks.set(
-              nextTaskIndex,
-              startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
-          nextTaskIndex++;
-          activeTaskCount++;
-        }
-      }
-
-      success = true;
-      return Collections.unmodifiableList(Arrays.asList(results));
-    } finally {
-      if (!success) {
-        cancelAll(tasks);
-      }
-    }
+        });
+    return Collections.unmodifiableList(Arrays.asList(results));
   }
 
   /**
@@ -193,30 +158,11 @@ public final class Parallel {
       return List.of();
     }
 
-    final var totalTaskCount = items.size();
-    final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
-    final var completionQueue = new LinkedBlockingQueue<TaskEvent<R>>();
-    final var tasks = new ArrayList<TaskHandle<R>>(Collections.nCopies(totalTaskCount, null));
-    final var results = (Either<R, Throwable>[]) new Either[totalTaskCount];
-    var activeTaskCount = 0;
-    var nextTaskIndex = 0;
-    var completedTaskCount = 0;
-    var success = false;
-
-    try {
-      while (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
-        tasks.set(
-            nextTaskIndex, startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
-        nextTaskIndex++;
-        activeTaskCount++;
-      }
-
-      while (completedTaskCount < totalTaskCount) {
-        final var event = takeFromQueue(completionQueue);
-        if (event.workerExited()) {
-          joinTask(tasks.get(event.index()));
-          activeTaskCount--;
-        } else {
+    final var results = (Either<R, Throwable>[]) new Either[items.size()];
+    runBatch(
+        items,
+        fn,
+        event -> {
           final var cause = event.failure();
           results[event.index()] =
               cause == null
@@ -225,25 +171,8 @@ public final class Parallel {
                       cause instanceof RuntimeException re && re.getCause() != null
                           ? re.getCause()
                           : cause);
-          completedTaskCount++;
-        }
-
-        if (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
-          tasks.set(
-              nextTaskIndex,
-              startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
-          nextTaskIndex++;
-          activeTaskCount++;
-        }
-      }
-
-      success = true;
-      return Collections.unmodifiableList(Arrays.asList(results));
-    } finally {
-      if (!success) {
-        cancelAll(tasks);
-      }
-    }
+        });
+    return Collections.unmodifiableList(Arrays.asList(results));
   }
 
   /**
@@ -269,6 +198,48 @@ public final class Parallel {
 
   // A timeout can produce a result before worker exit; only exit releases a batch slot.
   private record TaskEvent<R>(int index, boolean workerExited, R result, Throwable failure) {}
+
+  /**
+   * Runs {@code fn} over {@code items} in a sliding window of at most {@code maxConcurrency} live
+   * workers, passing each result event to {@code onResult}. If anything throws, including {@code
+   * onResult}, all started tasks are cancelled.
+   */
+  private <T, R> void runBatch(List<T> items, Function<T, R> fn, Consumer<TaskEvent<R>> onResult) {
+    final var totalTaskCount = items.size();
+    final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
+    final var completionQueue = new LinkedBlockingQueue<TaskEvent<R>>();
+    final var tasks = new ArrayList<TaskHandle<R>>(Collections.nCopies(totalTaskCount, null));
+    var activeTaskCount = 0;
+    var nextTaskIndex = 0;
+    var completedTaskCount = 0;
+    var success = false;
+
+    try {
+      while (completedTaskCount < totalTaskCount) {
+        while (nextTaskIndex < totalTaskCount && activeTaskCount < windowSize) {
+          tasks.set(
+              nextTaskIndex,
+              startTask(nextTaskIndex, items.get(nextTaskIndex), fn, completionQueue));
+          nextTaskIndex++;
+          activeTaskCount++;
+        }
+
+        final var event = takeFromQueue(completionQueue);
+        if (event.workerExited()) {
+          joinTask(tasks.get(event.index()));
+          activeTaskCount--;
+        } else {
+          onResult.accept(event);
+          completedTaskCount++;
+        }
+      }
+      success = true;
+    } finally {
+      if (!success) {
+        cancelAll(tasks);
+      }
+    }
+  }
 
   private record TaskHandle<R>(Thread worker, CompletableFuture<R> result) {
     void cancel() {
