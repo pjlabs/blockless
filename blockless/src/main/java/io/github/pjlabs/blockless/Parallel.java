@@ -117,11 +117,11 @@ public final class Parallel {
     runBatch(
         items,
         fn,
-        event -> {
-          if (event.failure() != null) {
-            throw wrapIfNeeded(event.failure());
+        completed -> {
+          if (completed.failure() != null) {
+            throw wrapIfNeeded(completed.failure());
           }
-          results[event.index()] = event.result();
+          results[completed.index()] = completed.result();
         });
     return Collections.unmodifiableList(Arrays.asList(results));
   }
@@ -162,11 +162,11 @@ public final class Parallel {
     runBatch(
         items,
         fn,
-        event -> {
-          final var cause = event.failure();
-          results[event.index()] =
+        completed -> {
+          final var cause = completed.failure();
+          results[completed.index()] =
               cause == null
-                  ? Either.ok(event.result())
+                  ? Either.ok(completed.result())
                   : Either.fail(
                       cause instanceof RuntimeException re && re.getCause() != null
                           ? re.getCause()
@@ -197,17 +197,22 @@ public final class Parallel {
   // ── Internal task management ──
 
   // A timeout can produce a result before worker exit; only exit releases a batch slot.
-  private record TaskEvent<R>(int index, boolean workerExited, R result, Throwable failure) {}
+  private sealed interface Signal<R> {
+    record Completed<R>(int index, R result, Throwable failure) implements Signal<R> {}
+
+    record Exited<R>(int index) implements Signal<R> {}
+  }
 
   /**
    * Runs {@code fn} over {@code items} in a sliding window of at most {@code maxConcurrency} live
-   * workers, passing each result event to {@code onResult}. If anything throws, including {@code
-   * onResult}, all started tasks are cancelled.
+   * workers, passing each completed result to {@code onResult}. If anything throws, including
+   * {@code onResult}, all started tasks are cancelled.
    */
-  private <T, R> void runBatch(List<T> items, Function<T, R> fn, Consumer<TaskEvent<R>> onResult) {
+  private <T, R> void runBatch(
+      List<T> items, Function<T, R> fn, Consumer<Signal.Completed<R>> onResult) {
     final var totalTaskCount = items.size();
     final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
-    final var completionQueue = new LinkedBlockingQueue<TaskEvent<R>>();
+    final var completionQueue = new LinkedBlockingQueue<Signal<R>>();
     final var tasks = new ArrayList<TaskHandle<R>>(Collections.nCopies(totalTaskCount, null));
     var activeTaskCount = 0;
     var nextTaskIndex = 0;
@@ -224,13 +229,15 @@ public final class Parallel {
           activeTaskCount++;
         }
 
-        final var event = takeFromQueue(completionQueue);
-        if (event.workerExited()) {
-          joinTask(tasks.get(event.index()));
-          activeTaskCount--;
-        } else {
-          onResult.accept(event);
-          completedTaskCount++;
+        switch (takeFromQueue(completionQueue)) {
+          case Signal.Exited<R> exited -> {
+            joinTask(tasks.get(exited.index()));
+            activeTaskCount--;
+          }
+          case Signal.Completed<R> completed -> {
+            onResult.accept(completed);
+            completedTaskCount++;
+          }
         }
       }
       success = true;
@@ -262,11 +269,11 @@ public final class Parallel {
   }
 
   private <T, R> TaskHandle<R> startTask(
-      int index, T item, Function<T, R> fn, LinkedBlockingQueue<TaskEvent<R>> completionQueue) {
+      int index, T item, Function<T, R> fn, LinkedBlockingQueue<Signal<R>> completionQueue) {
     return startTask(
         () -> fn.apply(item),
-        (value, failure) -> completionQueue.add(new TaskEvent<>(index, false, value, failure)),
-        () -> completionQueue.add(new TaskEvent<>(index, true, null, null)));
+        (value, failure) -> completionQueue.add(new Signal.Completed<>(index, value, failure)),
+        () -> completionQueue.add(new Signal.Exited<>(index)));
   }
 
   private <T> TaskHandle<T> startTask(
@@ -302,7 +309,7 @@ public final class Parallel {
     return new TaskHandle<>(worker, result);
   }
 
-  private static <R> TaskEvent<R> takeFromQueue(LinkedBlockingQueue<TaskEvent<R>> queue) {
+  private static <R> Signal<R> takeFromQueue(LinkedBlockingQueue<Signal<R>> queue) {
     try {
       return queue.take();
     } catch (InterruptedException e) {
