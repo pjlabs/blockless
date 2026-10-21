@@ -213,7 +213,7 @@ public final class Parallel {
     final var totalTaskCount = items.size();
     final var windowSize = maxConcurrency > 0 ? maxConcurrency : totalTaskCount;
     final var completionQueue = new LinkedBlockingQueue<Signal<R>>();
-    final var tasks = new ArrayList<TaskHandle<R>>(Collections.nCopies(totalTaskCount, null));
+    final var tasks = new ArrayList<VirtualTask<R>>(Collections.nCopies(totalTaskCount, null));
     var activeTaskCount = 0;
     var nextTaskIndex = 0;
     var completedTaskCount = 0;
@@ -248,7 +248,7 @@ public final class Parallel {
     }
   }
 
-  private record TaskHandle<R>(Thread worker, CompletableFuture<R> result) {
+  private record VirtualTask<R>(Thread worker, CompletableFuture<R> result) {
     void cancel() {
       worker.interrupt();
       result.cancel(false);
@@ -268,7 +268,7 @@ public final class Parallel {
     }
   }
 
-  private <T, R> TaskHandle<R> startTask(
+  private <T, R> VirtualTask<R> startTask(
       int index, T item, Function<T, R> fn, LinkedBlockingQueue<Signal<R>> completionQueue) {
     return startTask(
         () -> fn.apply(item),
@@ -276,7 +276,7 @@ public final class Parallel {
         () -> completionQueue.add(new Signal.Exited<>(index)));
   }
 
-  private <T> TaskHandle<T> startTask(
+  private <T> VirtualTask<T> startTask(
       Supplier<T> task, BiConsumer<T, Throwable> onResult, Runnable onWorkerExit) {
     final var timeoutNanos = timeout == null ? 0 : timeout.toNanos();
     final var result = new CompletableFuture<T>();
@@ -306,7 +306,7 @@ public final class Parallel {
     if (timeout != null) {
       result.orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
     }
-    return new TaskHandle<>(worker, result);
+    return new VirtualTask<>(worker, result);
   }
 
   private static <R> Signal<R> takeFromQueue(LinkedBlockingQueue<Signal<R>> queue) {
@@ -318,7 +318,7 @@ public final class Parallel {
     }
   }
 
-  private <R> void joinTask(TaskHandle<R> task) {
+  private <R> void joinTask(VirtualTask<R> task) {
     try {
       task.worker().join();
     } catch (InterruptedException e) {
@@ -327,7 +327,7 @@ public final class Parallel {
     }
   }
 
-  private <R> void cancelAll(List<TaskHandle<R>> tasks) {
+  private <R> void cancelAll(List<VirtualTask<R>> tasks) {
     for (final var task : tasks) {
       if (task != null) {
         task.cancel();
