@@ -26,7 +26,7 @@ import java.util.function.Supplier;
  * captured at call time and propagated using the configured {@link ContextPropagator} instances.
  *
  * <p>When {@link #withMaxConcurrency(int)} is set, {@link #map} and {@link #toEither} use a sliding
- * window — at most N worker threads are alive per batch. Tasks are collected in completion order to
+ * window — at most N calculations are active per batch. Tasks are collected in completion order to
  * avoid head-of-line blocking, but results are always returned in input order.
  *
  * <pre>{@code
@@ -59,7 +59,7 @@ public final class Parallel {
   /**
    * Returns a new {@link Parallel} with the same propagators but limited to {@code maxConcurrency}
    * concurrent tasks. In {@link #map} and {@link #toEither}, this controls the sliding window size
-   * — at most N worker threads are alive per batch.
+   * — at most N calculations are active per batch.
    */
   public Parallel withMaxConcurrency(int maxConcurrency) {
     if (maxConcurrency < 1) {
@@ -102,8 +102,8 @@ public final class Parallel {
    * Applies {@code fn} to each element on virtual threads with context propagation, returning
    * results in input order. Blocks until all tasks complete.
    *
-   * <p>With {@link #withMaxConcurrency(int)}, uses a sliding window — at most N worker threads are
-   * alive per batch. Tasks are collected in completion order to maximize throughput. On failure,
+   * <p>With {@link #withMaxConcurrency(int)}, uses a sliding window — at most N calculations are
+   * active per batch. Tasks are collected in completion order to maximize throughput. On failure,
    * remaining in-progress tasks are interrupted without waiting for them to exit.
    */
   @SuppressWarnings("unchecked")
@@ -199,7 +199,8 @@ public final class Parallel {
 
   // A timeout can produce a result before worker exit; only exit releases a batch slot.
   private sealed interface Signal<R> {
-    record Completed<R>(int index, R result, Throwable failure) implements Signal<R> {}
+    record Completed<R>(int index, R result, Throwable failure, boolean releasesSlot)
+        implements Signal<R> {}
 
     record Exited<R>(int index) implements Signal<R> {}
   }
@@ -232,10 +233,12 @@ public final class Parallel {
 
         switch (takeFromQueue(completionQueue)) {
           case Signal.Exited<R> exited -> {
-            joinTask(tasks.get(exited.index()));
             activeTaskCount--;
           }
           case Signal.Completed<R> completed -> {
+            if (completed.releasesSlot()) {
+              activeTaskCount--;
+            }
             onResult.accept(completed);
             completedTaskCount++;
           }
@@ -283,7 +286,8 @@ public final class Parallel {
       int index, T item, Function<T, R> fn, LinkedBlockingQueue<Signal<R>> completionQueue) {
     return startTask(
         () -> fn.apply(item),
-        (value, failure) -> completionQueue.add(new Signal.Completed<>(index, value, failure)),
+        (value, failure) ->
+            completionQueue.add(new Signal.Completed<>(index, value, failure, timeout == null)),
         () -> completionQueue.add(new Signal.Exited<>(index)));
   }
 
@@ -298,21 +302,30 @@ public final class Parallel {
             .unstarted(
                 () -> {
                   try {
-                    result.complete(callable.call());
+                    final var value = callable.call();
+                    if (result.complete(value) && timeout == null) {
+                      onResult.accept(value, null);
+                    }
                   } catch (Throwable failure) {
-                    result.completeExceptionally(failure);
+                    if (result.completeExceptionally(failure) && timeout == null) {
+                      onResult.accept(null, failure);
+                    }
                   } finally {
-                    onWorkerExit.run();
+                    if (timeout != null) {
+                      onWorkerExit.run();
+                    }
                   }
                 });
 
-    result.whenComplete(
-        (value, failure) -> {
-          if (failure instanceof TimeoutException) {
-            worker.interrupt();
-          }
-          onResult.accept(value, failure);
-        });
+    if (timeout != null) {
+      result.whenComplete(
+          (value, failure) -> {
+            if (failure instanceof TimeoutException) {
+              worker.interrupt();
+            }
+            onResult.accept(value, failure);
+          });
+    }
 
     worker.start();
     if (timeout != null) {
@@ -324,15 +337,6 @@ public final class Parallel {
   private static <R> Signal<R> takeFromQueue(LinkedBlockingQueue<Signal<R>> queue) {
     try {
       return queue.take();
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw new RuntimeException(e);
-    }
-  }
-
-  private <R> void joinTask(VirtualTask<R> task) {
-    try {
-      task.worker().join();
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new RuntimeException(e);
