@@ -29,6 +29,11 @@ import java.util.function.Supplier;
  * window — at most N calculations are active per batch. Tasks are collected in completion order to
  * avoid head-of-line blocking, but results are always returned in input order.
  *
+ * <p>Callers own the resources used by submitted calculations and are responsible for their
+ * cleanup. Submitted code must handle interruption and resources being closed after a batch returns
+ * or throws. Cancellation requests interruption; failure or timeout can be reported before workers
+ * finish.
+ *
  * <pre>{@code
  * var parallel = Parallel.create(new Slf4jMdcContextPropagator());
  * List<String> results = parallel.map(ids, id -> fetchName(id));
@@ -74,9 +79,17 @@ public final class Parallel {
    * #map} and {@link #async} wrap it in {@link RuntimeException}; {@link #toEither} collects it as
    * a failed {@link Either}.
    *
-   * <p>Timeouts stop waiting for the result, even if the task ignores interruption. Such tasks may
-   * continue running in the background. In bounded batches they retain their concurrency slot until
-   * they exit, so queued tasks may still delay completion of the batch.
+   * <p>The timeout starts when each task is launched; time queued for a concurrency slot does not
+   * count. This is a per-task timeout, not a deadline for the batch.
+   *
+   * <p>A timeout settles the task's result and interrupts its worker without waiting for cleanup.
+   * Code that ignores interruption may keep running after its result has timed out. Callers remain
+   * responsible for resource cleanup; submitted code must tolerate interruption and closed
+   * resources.
+   *
+   * <p>In bounded batches, a timed-out calculation keeps its concurrency slot until it finishes.
+   * Queued tasks can start only when a slot becomes available, so their progress depends on running
+   * calculations responding to cancellation.
    */
   public Parallel withTimeout(Duration timeout) {
     Objects.requireNonNull(timeout, "timeout");
@@ -197,7 +210,7 @@ public final class Parallel {
 
   // ── Internal task management ──
 
-  // A timeout can produce a result before worker exit; only exit releases a batch slot.
+  // A timeout can settle a result before calculation cleanup finishes; its slot stays occupied.
   private sealed interface Signal<R> {
     record Completed<R>(int index, R result, Throwable failure, boolean releasesSlot)
         implements Signal<R> {}
@@ -206,8 +219,8 @@ public final class Parallel {
   }
 
   /**
-   * Runs {@code fn} over {@code items} in a sliding window of at most {@code maxConcurrency} live
-   * workers, passing each completed result to {@code onResult}. If anything throws, including
+   * Runs {@code fn} over {@code items} in a sliding window of at most {@code maxConcurrency} active
+   * calculations, passing each completed result to {@code onResult}. If anything throws, including
    * {@code onResult}, all started tasks are cancelled.
    */
   private <T, R> void runBatch(

@@ -869,6 +869,93 @@ class ParallelTest {
     }
 
     @Test
+    void batchCanOutlastPerTaskTimeout() {
+      final var timedParallel = parallel.withMaxConcurrency(1).withTimeout(Duration.ofMillis(100));
+      final var items = IntStream.range(0, 10).boxed().toList();
+      final var started = System.nanoTime();
+
+      final var results =
+          assertTimeoutPreemptively(
+              Duration.ofSeconds(1),
+              () ->
+                  timedParallel.map(
+                      items,
+                      item -> {
+                        try {
+                          Thread.sleep(Duration.ofMillis(50));
+                        } catch (InterruptedException e) {
+                          Thread.currentThread().interrupt();
+                          throw new RuntimeException(e);
+                        }
+                        return item;
+                      }));
+
+      assertEquals(items, results, "all ten tasks must finish within their individual timeout");
+      assertTrue(
+          System.nanoTime() - started >= Duration.ofMillis(500).toNanos(),
+          "the sequential batch must be allowed to take 500 ms despite a 100 ms timeout");
+    }
+
+    @Test
+    void mapFailsWithinOneSecondWhenTaskExceedsTimeout() throws InterruptedException {
+      final var timedParallel = parallel.withMaxConcurrency(1).withTimeout(Duration.ofMillis(100));
+      final var items = IntStream.range(0, 10).boxed().toList();
+      final var interrupted = new CountDownLatch(1);
+
+      final var failure =
+          assertTimeoutPreemptively(
+              Duration.ofSeconds(1),
+              () ->
+                  assertThrows(
+                      RuntimeException.class,
+                      () ->
+                          timedParallel.map(
+                              items,
+                              item -> {
+                                try {
+                                  Thread.sleep(Duration.ofMillis(200));
+                                } catch (InterruptedException e) {
+                                  interrupted.countDown();
+                                  Thread.currentThread().interrupt();
+                                  throw new RuntimeException(e);
+                                }
+                                return item;
+                              })));
+
+      assertInstanceOf(TimeoutException.class, failure.getCause());
+      assertTrue(interrupted.await(1, TimeUnit.SECONDS), "the timed-out task must be interrupted");
+    }
+
+    @Test
+    void toEitherCollectsFiveTimeoutsWithinOneSecond() {
+      final var timedParallel = parallel.withMaxConcurrency(1).withTimeout(Duration.ofMillis(100));
+      final var items = IntStream.range(0, 5).boxed().toList();
+      final var started = System.nanoTime();
+
+      final var results =
+          assertTimeoutPreemptively(
+              Duration.ofSeconds(1),
+              () ->
+                  timedParallel.toEither(
+                      items,
+                      item -> {
+                        try {
+                          Thread.sleep(Duration.ofMillis(200));
+                        } catch (InterruptedException e) {
+                          Thread.currentThread().interrupt();
+                          throw new RuntimeException(e);
+                        }
+                        return item;
+                      }));
+
+      assertEquals(5, results.size());
+      results.forEach(result -> assertInstanceOf(TimeoutException.class, result.failure()));
+      assertTrue(
+          System.nanoTime() - started >= Duration.ofMillis(500).toNanos(),
+          "five sequential task timeouts must take at least 500 ms");
+    }
+
+    @Test
     void rejectsZeroTimeout() {
       assertThrows(
           IllegalArgumentException.class,
