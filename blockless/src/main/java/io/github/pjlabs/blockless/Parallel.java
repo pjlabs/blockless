@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -94,7 +95,7 @@ public final class Parallel {
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
-    return startTask(task, (value, failure) -> {}, () -> {}).supplier();
+    return startTask(task, (value, failure) -> {}, () -> {})::await;
   }
 
   /**
@@ -248,22 +249,32 @@ public final class Parallel {
     }
   }
 
-  private record VirtualTask<R>(Thread worker, CompletableFuture<R> result) {
+  private record VirtualTask<R>(
+      Thread worker, CompletableFuture<R> result, Duration timeout, long startNanos) {
     void cancel() {
       worker.interrupt();
       result.cancel(false);
     }
 
-    Supplier<R> supplier() {
-      final var supplier = Blockless.supplier(result);
-      return () -> {
-        try {
-          return supplier.get();
-        } finally {
-          if (Thread.currentThread().isInterrupted()) {
-            cancel();
-          }
+    // Joins the worker rather than the future, so async() needs no helper thread to wait on.
+    R await() {
+      try {
+        if (timeout == null) {
+          worker.join();
+        } else if (!worker.join(timeout.minusNanos(System.nanoTime() - startNanos))) {
+          result.completeExceptionally(new TimeoutException()); // no-op if orTimeout won
         }
+      } catch (InterruptedException e) {
+        cancel();
+        Thread.currentThread().interrupt();
+        throw new RuntimeException(e);
+      }
+      // Settled by now: the worker completes the result before exiting, or the deadline did.
+      return switch (result.state()) {
+        case SUCCESS -> result.resultNow();
+        case FAILED -> throw wrapIfNeeded(result.exceptionNow());
+        case CANCELLED -> throw new CancellationException();
+        case RUNNING -> throw new IllegalStateException("worker exited without a result");
       };
     }
   }
@@ -279,6 +290,7 @@ public final class Parallel {
   private <T> VirtualTask<T> startTask(
       Supplier<T> task, BiConsumer<T, Throwable> onResult, Runnable onWorkerExit) {
     final var timeoutNanos = timeout == null ? 0 : timeout.toNanos();
+    final var startNanos = System.nanoTime();
     final var result = new CompletableFuture<T>();
     final var callable = CallableContext.<T>wrap(task::get, propagators);
     final var worker =
@@ -306,7 +318,7 @@ public final class Parallel {
     if (timeout != null) {
       result.orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
     }
-    return new VirtualTask<>(worker, result);
+    return new VirtualTask<>(worker, result, timeout, startNanos);
   }
 
   private static <R> Signal<R> takeFromQueue(LinkedBlockingQueue<Signal<R>> queue) {

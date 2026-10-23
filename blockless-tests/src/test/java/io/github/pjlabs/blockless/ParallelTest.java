@@ -10,15 +10,21 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
+import java.nio.file.Files;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import jdk.jfr.Recording;
+import jdk.jfr.consumer.RecordingFile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -133,6 +139,41 @@ class ParallelTest {
   void asyncRunsOnVirtualThread() {
     final var supplier = parallel.async(() -> Thread.currentThread().isVirtual());
     assertTrue(supplier.get());
+  }
+
+  @Test
+  void asyncStartsOnlyTheWorkerThread() throws Exception {
+    final var workerIds = new HashSet<Long>();
+    final var startedIds =
+        startedVirtualThreadIds(
+            () -> {
+              for (final var p : List.of(parallel, parallel.withTimeout(Duration.ofSeconds(5)))) {
+                for (int i = 0; i < 50; i++) {
+                  workerIds.add(p.async(() -> Thread.currentThread().threadId()).get());
+                }
+              }
+            });
+
+    assertEquals(100, workerIds.size());
+    assertEquals(
+        workerIds, startedIds, "async() must not start virtual threads besides its worker");
+  }
+
+  private static Set<Long> startedVirtualThreadIds(Runnable action) throws Exception {
+    final var file = Files.createTempFile("virtual-thread-starts", ".jfr");
+    try (final var recording = new Recording()) {
+      recording.enable("jdk.VirtualThreadStart");
+      recording.start();
+      action.run();
+      recording.stop();
+      recording.dump(file);
+      return RecordingFile.readAllEvents(file).stream()
+          .filter(event -> event.getEventType().getName().equals("jdk.VirtualThreadStart"))
+          .map(event -> event.getLong("javaThreadId"))
+          .collect(Collectors.toSet());
+    } finally {
+      Files.deleteIfExists(file);
+    }
   }
 
   @Test
