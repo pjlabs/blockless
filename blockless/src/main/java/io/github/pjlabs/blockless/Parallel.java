@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -265,32 +266,26 @@ public final class Parallel {
     }
   }
 
-  private record VirtualTask<R>(
-      Thread worker, CompletableFuture<R> result, Duration timeout, long startNanos) {
+  private record VirtualTask<R>(Thread worker, CompletableFuture<R> result, CountDownLatch latch) {
     void cancel() {
       worker.interrupt();
       result.cancel(false);
     }
 
-    // Joins the worker rather than the future, so async() needs no helper thread to wait on.
+    // Waits until the future settles. orTimeout opens the latch without the worker exiting.
     R await() {
       try {
-        if (timeout == null) {
-          worker.join();
-        } else if (!worker.join(timeout.minusNanos(System.nanoTime() - startNanos))) {
-          result.completeExceptionally(new TimeoutException()); // no-op if orTimeout won
-        }
+        latch.await();
       } catch (InterruptedException e) {
         cancel();
         Thread.currentThread().interrupt();
         throw new RuntimeException(e);
       }
-      // Settled by now: the worker completes the result before exiting, or the deadline did.
       return switch (result.state()) {
         case SUCCESS -> result.resultNow();
         case FAILED -> throw wrapIfNeeded(result.exceptionNow());
         case CANCELLED -> throw new CancellationException();
-        case RUNNING -> throw new IllegalStateException("worker exited without a result");
+        case RUNNING -> throw new IllegalStateException("Result not completed");
       };
     }
   }
@@ -301,14 +296,17 @@ public final class Parallel {
         () -> fn.apply(item),
         (value, failure) ->
             completionQueue.add(new Signal.Completed<>(index, value, failure, timeout == null)),
-        () -> completionQueue.add(new Signal.Exited<>(index)));
+        () -> {
+          if (timeout != null) {
+            completionQueue.add(new Signal.Exited<>(index));
+          }
+        });
   }
 
   private <T> VirtualTask<T> startTask(
       Supplier<T> task, BiConsumer<T, Throwable> onResult, Runnable onWorkerExit) {
-    final var timeoutNanos = timeout == null ? 0 : timeout.toNanos();
-    final var startNanos = System.nanoTime();
     final var result = new CompletableFuture<T>();
+    final var latch = new CountDownLatch(1);
     final var callable = CallableContext.<T>wrap(task::get, propagators);
     final var worker =
         Thread.ofVirtual()
@@ -316,35 +314,31 @@ public final class Parallel {
                 () -> {
                   try {
                     final var value = callable.call();
-                    if (result.complete(value) && timeout == null) {
-                      onResult.accept(value, null);
-                    }
+                    result.complete(value);
                   } catch (Throwable failure) {
-                    if (result.completeExceptionally(failure) && timeout == null) {
-                      onResult.accept(null, failure);
-                    }
+                    result.completeExceptionally(failure);
                   } finally {
-                    if (timeout != null) {
-                      onWorkerExit.run();
-                    }
+                    onWorkerExit.run();
                   }
                 });
 
-    if (timeout != null) {
-      result.whenComplete(
-          (value, failure) -> {
-            if (failure instanceof TimeoutException) {
+    result.whenComplete(
+        (value, failure) -> {
+          try {
+            if (timeout != null && failure instanceof TimeoutException) {
               worker.interrupt();
             }
             onResult.accept(value, failure);
-          });
-    }
+          } finally {
+            latch.countDown();
+          }
+        });
 
     worker.start();
     if (timeout != null) {
-      result.orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
+      result.orTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS);
     }
-    return new VirtualTask<>(worker, result, timeout, startNanos);
+    return new VirtualTask<>(worker, result, latch);
   }
 
   private static <R> Signal<R> takeFromQueue(LinkedBlockingQueue<Signal<R>> queue) {
