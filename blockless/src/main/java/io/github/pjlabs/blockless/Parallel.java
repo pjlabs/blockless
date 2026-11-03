@@ -180,12 +180,7 @@ public final class Parallel {
         completed -> {
           final var cause = completed.failure();
           results[completed.index()] =
-              cause == null
-                  ? Either.ok(completed.result())
-                  : Either.fail(
-                      cause instanceof RuntimeException re && re.getCause() != null
-                          ? re.getCause()
-                          : cause);
+              cause == null ? Either.ok(completed.result()) : Either.fail(cause);
         });
     return Collections.unmodifiableList(Arrays.asList(results));
   }
