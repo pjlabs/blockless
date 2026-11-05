@@ -47,6 +47,40 @@ class ParallelTest {
   }
 
   @Test
+  void preservesOriginalError() {
+    for (final var p : List.of(parallel, parallel.withTimeout(Duration.ofSeconds(30)))) {
+      final var original = new AssertionError("task failed");
+      assertSame(
+          original,
+          assertThrows(
+              AssertionError.class,
+              () ->
+                  p.async(
+                          () -> {
+                            throw original;
+                          })
+                      .get()));
+      assertSame(
+          original,
+          assertThrows(
+              AssertionError.class,
+              () ->
+                  p.map(
+                      List.of(1),
+                      item -> {
+                        throw original;
+                      })));
+      final var results =
+          p.toEither(
+              List.of(1),
+              item -> {
+                throw original;
+              });
+      assertSame(original, results.get(0).failure());
+    }
+  }
+
+  @Test
   void mapReturnsResultsInInputOrder() {
     // Items with variable sleep times — results must match input order, not completion order
     final var items = List.of(3, 1, 2);

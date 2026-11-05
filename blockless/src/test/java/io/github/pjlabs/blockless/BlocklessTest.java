@@ -3,6 +3,7 @@ package io.github.pjlabs.blockless;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -12,6 +13,25 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class BlocklessTest {
+
+  @Test
+  void rethrowsOriginalError() {
+    final var original = new AssertionError("worker failed");
+    assertSame(
+        original,
+        assertThrows(
+            AssertionError.class,
+            () ->
+                Blockless.get(
+                    () -> {
+                      throw original;
+                    })));
+    assertSame(
+        original,
+        assertThrows(
+            AssertionError.class,
+            () -> Blockless.get(CompletableFuture.failedFuture(original))));
+  }
 
   @Nested
   class GetCompletionStage {
