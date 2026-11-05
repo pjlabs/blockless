@@ -357,6 +357,9 @@ public final class Parallel {
     if (t instanceof RuntimeException re) {
       return re;
     }
+    if (t instanceof Error error) {
+      throw error;
+    }
     return new RuntimeException(t);
   }
 }
