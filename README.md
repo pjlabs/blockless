@@ -98,7 +98,7 @@ Map<String, Profile> profiles = parallel.asMap(userIds, id -> loadProfile(id));
 var boundedParallel = parallel.withMaxConcurrency(10);
 List<String> names = boundedParallel.map(userIds, id -> fetchName(id));
 
-// Per-task timeout — thread is interrupted if task exceeds the deadline
+// Per-task timeout — result fails and worker is interrupted at the deadline
 var timedParallel = parallel.withTimeout(Duration.ofSeconds(5));
 List<String> names = timedParallel.map(userIds, id -> fetchName(id));
 
@@ -108,6 +108,19 @@ var safeParallel = parallel.withMaxConcurrency(10).withTimeout(Duration.ofSecond
 // Collect results without failing fast — failed tasks return Either.fail()
 List<Either<String, Throwable>> results = parallel.toEither(ids, id -> riskyFetch(id));
 ```
+
+Timeouts apply to each task after it is launched. Time queued for a concurrency slot does not count,
+and the task timeout is not a deadline for the batch. `map()` throws a wrapped `TimeoutException`,
+while `toEither()` collects it as `Either.fail()` and continues processing the other items.
+
+On failure, `map()` interrupts the other active workers without waiting for their cleanup. A task
+that ignores interruption may keep running after its result has timed out or the batch has returned.
+Callers own resource allocation and cleanup. Submitted code must handle interruption and resources
+being closed after the batch returns or throws.
+
+In bounded batches, timed-out calculations retain their slots until they finish. Queued tasks start
+only when a slot becomes available; their progress therefore depends on running calculations
+responding to cancellation.
 
 ## Context propagation
 

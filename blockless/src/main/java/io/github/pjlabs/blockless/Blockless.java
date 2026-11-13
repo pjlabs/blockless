@@ -92,7 +92,7 @@ public class Blockless {
               } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throwable.set(e);
-              } catch (Exception e) {
+              } catch (Throwable e) {
                 throwable.set(e);
               }
             });
@@ -123,11 +123,15 @@ public class Blockless {
   }
 
   /**
-   * Rethrows RuntimeException subclasses directly; wraps checked exceptions in RuntimeException.
+   * Rethrows RuntimeException and Error subclasses directly; wraps checked exceptions in
+   * RuntimeException.
    */
   private static RuntimeException wrapIfChecked(Throwable t) {
     if (t instanceof RuntimeException re) {
       return re;
+    }
+    if (t instanceof Error error) {
+      throw error;
     }
     return new RuntimeException(t);
   }

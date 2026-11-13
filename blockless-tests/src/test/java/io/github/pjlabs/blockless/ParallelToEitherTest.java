@@ -2,6 +2,7 @@ package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -88,6 +89,28 @@ class ParallelToEitherTest {
       assertTrue(eithers.get(0).isFailed());
       assertInstanceOf(IllegalStateException.class, eithers.get(0).failure());
       assertEquals("original", eithers.get(0).failure().getMessage());
+    }
+
+    @Test
+    void preservesRuntimeExceptionWithCause() {
+      final var cause = new IllegalArgumentException("cause");
+      final var failure = new IllegalStateException("original", cause);
+      failure.addSuppressed(new IllegalArgumentException("suppressed"));
+
+      final var eithers =
+          parallel.toEither(
+              List.of(1, 2),
+              i -> {
+                if (i == 1) {
+                  throw failure;
+                }
+                return i * 10;
+              });
+
+      assertTrue(eithers.get(0).isFailed());
+      assertSame(failure, eithers.get(0).failure());
+      assertTrue(eithers.get(1).isOk());
+      assertEquals(20, eithers.get(1).result());
     }
 
     @Test
