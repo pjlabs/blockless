@@ -5,7 +5,7 @@ name: Maven Package
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 jobs:
   build:
@@ -15,11 +15,11 @@ jobs:
       contents: read
 
     steps:
-    - uses: actions/checkout@v5
+    - uses: actions/checkout@v7
 
     # ~/.m2/settings.xml — Central token + GPG for mvn -P release deploy
     - name: Set up JDK 21 (Maven Central + GPG)
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@v6
       with:
         java-version: '21'
         distribution: 'temurin'
@@ -30,9 +30,11 @@ jobs:
         gpg-private-key: ${{ secrets.GPG_SIGNING_KEY }}
         gpg-passphrase: MAVEN_GPG_PASSPHRASE
     - name: Set version
-      run: mvn versions:set -DnewVersion=${{ github.event.release.tag_name }}
+      run: mvn --batch-mode versions:set -DnewVersion="$RELEASE_TAG" -DgenerateBackupPoms=false
+      env:
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
     - name: Publish to Maven Central
-      run: mvn -P release --batch-mode deploy
+      run: mvn -P release --batch-mode clean deploy
       env:
         MAVEN_USERNAME: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
         MAVEN_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
