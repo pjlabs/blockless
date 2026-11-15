@@ -7,7 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -169,20 +172,73 @@ class BlocklessTest {
     }
 
     @Test
-    void completedSupplierSurvivesInterruptedInvocation() {
+    void completedSupplierReturnsResultToInterruptedCaller() {
       final var supplier = Blockless.supplier(() -> "done");
       assertEquals("done", supplier.get());
 
       try {
         Thread.currentThread().interrupt();
-        final var failure = assertThrows(RuntimeException.class, supplier::get);
-        assertInstanceOf(InterruptedException.class, failure.getCause());
+        assertEquals("done", supplier.get());
         assertTrue(Thread.currentThread().isInterrupted());
       } finally {
         Thread.interrupted();
       }
 
       assertEquals("done", supplier.get());
+    }
+
+    @Test
+    void completedSupplierReturnsNullToInterruptedCaller() {
+      final var supplier = Blockless.supplier(() -> null);
+      assertNull(supplier.get());
+
+      try {
+        Thread.currentThread().interrupt();
+        assertNull(supplier.get());
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+
+      assertNull(supplier.get());
+    }
+
+    @Test
+    void completedSupplierRethrowsOriginalFailureToInterruptedCaller() {
+      final var original = new IllegalStateException("broken");
+      final var supplier =
+          Blockless.supplier(
+              () -> {
+                throw original;
+              });
+      assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+
+      try {
+        Thread.currentThread().interrupt();
+        assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+
+      assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+    }
+
+    @Test
+    void preservesCompletionAndCancellationExceptions() {
+      for (final var original :
+          List.of(
+              new CompletionException(new IllegalStateException("broken")),
+              new CancellationException("cancelled"))) {
+        final var supplier =
+            Blockless.supplier(
+                () -> {
+                  throw original;
+                });
+
+        assertSame(original, assertThrows(RuntimeException.class, supplier::get));
+        assertSame(original, assertThrows(RuntimeException.class, supplier::get));
+      }
     }
 
     @Test
@@ -222,6 +278,8 @@ class BlocklessTest {
       } finally {
         releaseWorker.countDown();
       }
+
+      assertEquals("done", supplier.get());
     }
   }
 }
