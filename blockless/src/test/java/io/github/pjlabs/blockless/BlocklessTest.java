@@ -169,6 +169,23 @@ class BlocklessTest {
     }
 
     @Test
+    void completedSupplierSurvivesInterruptedInvocation() {
+      final var supplier = Blockless.supplier(() -> "done");
+      assertEquals("done", supplier.get());
+
+      try {
+        Thread.currentThread().interrupt();
+        final var failure = assertThrows(RuntimeException.class, supplier::get);
+        assertInstanceOf(InterruptedException.class, failure.getCause());
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+
+      assertEquals("done", supplier.get());
+    }
+
+    @Test
     void supplierCanBeReusedAfterFailure() {
       final var original = new IllegalStateException("broken");
       final var supplier =
