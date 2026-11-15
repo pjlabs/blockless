@@ -75,33 +75,35 @@ public class Blockless {
   }
 
   /**
-   * Runs the callable in a virtual thread and returns the value of the callable.
+   * Starts the callable on a virtual thread and returns a supplier that waits for its completion.
    *
    * @param callable a callable
    * @param <T> the type of the value
-   * @return the value of the callable
+   * @return a supplier that waits for the value of the callable
    */
   public static <T> Supplier<T> supplier(Callable<T> callable) {
     final var result = new AtomicReference<T>();
     final var throwable = new AtomicReference<Throwable>();
-    final var thread =
-        Thread.startVirtualThread(
-            () -> {
-              try {
-                result.set(callable.call());
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throwable.set(e);
-              } catch (Throwable e) {
-                throwable.set(e);
-              }
-            });
+    final var latch = new CountDownLatch(1);
+    Thread.startVirtualThread(
+        () -> {
+          try {
+            result.set(callable.call());
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throwable.set(e);
+          } catch (Throwable e) {
+            throwable.set(e);
+          } finally {
+            latch.countDown();
+          }
+        });
     return () -> {
       try {
-        thread.join();
+        latch.await();
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        throwable.set(e);
+        throw new RuntimeException(e);
       }
       if (throwable.get() != null) {
         throw wrapIfChecked(throwable.get());

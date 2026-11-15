@@ -1,6 +1,7 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -8,9 +9,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 class BlocklessTest {
 
@@ -29,8 +33,7 @@ class BlocklessTest {
     assertSame(
         original,
         assertThrows(
-            AssertionError.class,
-            () -> Blockless.get(CompletableFuture.failedFuture(original))));
+            AssertionError.class, () -> Blockless.get(CompletableFuture.failedFuture(original))));
   }
 
   @Nested
@@ -98,6 +101,7 @@ class BlocklessTest {
   }
 
   @Nested
+  @Timeout(10)
   class GetCallable {
 
     @Test
@@ -154,6 +158,60 @@ class BlocklessTest {
 
       final var thrown = assertThrows(IllegalArgumentException.class, supplier::get);
       assertEquals("bad", thrown.getMessage());
+    }
+
+    @Test
+    void supplierCanBeReusedAfterCompletion() {
+      final var supplier = Blockless.supplier(() -> "done");
+
+      assertEquals("done", supplier.get());
+      assertEquals("done", supplier.get());
+      assertNull(Blockless.get(() -> null));
+    }
+
+    @Test
+    void supplierCanBeReusedAfterFailure() {
+      final var original = new IllegalStateException("broken");
+      final var supplier =
+          Blockless.supplier(
+              () -> {
+                throw original;
+              });
+
+      assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+      assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+    }
+
+    @Test
+    void interruptedCallerDoesNotAffectOtherCallers() throws Exception {
+      final var releaseWorker = new CountDownLatch(1);
+      final var supplier =
+          Blockless.supplier(
+              () -> {
+                releaseWorker.await();
+                return "done";
+              });
+      final var waitingCaller = new FutureTask<>(supplier::get);
+      final var interruptedCaller =
+          new FutureTask<>(
+              () -> {
+                Thread.currentThread().interrupt();
+                final var failure = assertThrows(RuntimeException.class, supplier::get);
+                assertInstanceOf(InterruptedException.class, failure.getCause());
+                return Thread.currentThread().isInterrupted();
+              });
+
+      try {
+        Thread.startVirtualThread(waitingCaller);
+        Thread.startVirtualThread(interruptedCaller);
+        assertTrue(interruptedCaller.get(5, TimeUnit.SECONDS));
+        assertFalse(waitingCaller.isDone());
+        releaseWorker.countDown();
+        assertEquals("done", waitingCaller.get(5, TimeUnit.SECONDS));
+        assertEquals("done", supplier.get());
+      } finally {
+        releaseWorker.countDown();
+      }
     }
   }
 }
