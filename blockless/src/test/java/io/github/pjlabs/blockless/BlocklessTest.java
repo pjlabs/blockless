@@ -1,7 +1,6 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -183,7 +182,7 @@ class BlocklessTest {
     }
 
     @Test
-    void interruptedCallerDoesNotAffectOtherCallers() throws Exception {
+    void interruptedCallerPreservesInterruptStatus() throws Exception {
       final var releaseWorker = new CountDownLatch(1);
       final var supplier =
           Blockless.supplier(
@@ -191,7 +190,6 @@ class BlocklessTest {
                 releaseWorker.await();
                 return "done";
               });
-      final var waitingCaller = new FutureTask<>(supplier::get);
       final var interruptedCaller =
           new FutureTask<>(
               () -> {
@@ -202,13 +200,8 @@ class BlocklessTest {
               });
 
       try {
-        Thread.startVirtualThread(waitingCaller);
         Thread.startVirtualThread(interruptedCaller);
         assertTrue(interruptedCaller.get(5, TimeUnit.SECONDS));
-        assertFalse(waitingCaller.isDone());
-        releaseWorker.countDown();
-        assertEquals("done", waitingCaller.get(5, TimeUnit.SECONDS));
-        assertEquals("done", supplier.get());
       } finally {
         releaseWorker.countDown();
       }

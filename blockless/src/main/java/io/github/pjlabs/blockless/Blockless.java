@@ -103,7 +103,7 @@ public class Blockless {
         latch.await();
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        throw new RuntimeException(e);
+        throwable.set(e);
       }
       if (throwable.get() != null) {
         throw wrapIfChecked(throwable.get());
