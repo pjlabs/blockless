@@ -1,6 +1,9 @@
 package io.github.pjlabs.blockless;
 
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
@@ -75,38 +78,47 @@ public class Blockless {
   }
 
   /**
-   * Runs the callable in a virtual thread and returns the value of the callable.
+   * Starts the callable on a virtual thread and returns a supplier that waits for its completion.
+   *
+   * <p>Once completed, the supplier reads the cached outcome without waiting, even if the caller is
+   * interrupted. An interruption while waiting affects only that invocation.
    *
    * @param callable a callable
    * @param <T> the type of the value
-   * @return the value of the callable
+   * @return a supplier that waits for the value of the callable
    */
   public static <T> Supplier<T> supplier(Callable<T> callable) {
-    final var result = new AtomicReference<T>();
-    final var throwable = new AtomicReference<Throwable>();
-    final var thread =
-        Thread.startVirtualThread(
-            () -> {
-              try {
-                result.set(callable.call());
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throwable.set(e);
-              } catch (Throwable e) {
-                throwable.set(e);
-              }
-            });
+    final var result = new CompletableFuture<T>();
+    final var latch = new CountDownLatch(1);
+    Thread.startVirtualThread(
+        () -> {
+          try {
+            result.complete(callable.call());
+          } catch (Throwable failure) {
+            if (failure instanceof InterruptedException) {
+              Thread.currentThread().interrupt();
+            }
+            // exceptionNow() unwraps one CompletionException; preserve the original failure.
+            result.completeExceptionally(new CompletionException(failure));
+          } finally {
+            latch.countDown();
+          }
+        });
     return () -> {
-      try {
-        thread.join();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throwable.set(e);
+      if (!result.isDone()) {
+        try {
+          latch.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw wrapIfChecked(e);
+        }
       }
-      if (throwable.get() != null) {
-        throw wrapIfChecked(throwable.get());
-      }
-      return result.get();
+      return switch (result.state()) {
+        case SUCCESS -> result.resultNow();
+        case FAILED -> throw wrapIfChecked(result.exceptionNow());
+        case CANCELLED -> throw new CancellationException();
+        case RUNNING -> throw new IllegalStateException("Result not completed");
+      };
     };
   }
 
