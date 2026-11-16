@@ -84,6 +84,27 @@ class BlocklessTest {
     }
 
     @Test
+    @Timeout(10)
+    void interruptedWaitDoesNotAffectLaterCalls() throws Exception {
+      final var stage = new CompletableFuture<String>();
+      final var supplier = Blockless.supplier(stage);
+      final var interruptedCaller =
+          new FutureTask<>(
+              () -> {
+                Thread.currentThread().interrupt();
+                final var failure = assertThrows(RuntimeException.class, supplier::get);
+                assertInstanceOf(InterruptedException.class, failure.getCause());
+                return Thread.currentThread().isInterrupted();
+              });
+
+      Thread.startVirtualThread(interruptedCaller);
+      assertTrue(interruptedCaller.get(5, TimeUnit.SECONDS));
+
+      stage.complete("done");
+      assertEquals("done", supplier.get());
+    }
+
+    @Test
     void worksRegardlessOfCompletingExecutor() {
       // Stage completes on ForkJoinPool (default) — Blockless.get should
       // still work because it uses its own virtual thread + latch, not the

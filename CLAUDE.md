@@ -28,7 +28,7 @@ Java 21 required. No preview features.
 ## Design Rules
 
 - `Blockless.get(CompletionStage)` waits via virtual thread + `CountDownLatch` — never enters the future's internals
-- `Parallel` uses `Blockless.supplier()` + `CallableContext.wrap()` — not `CompletableFuture.supplyAsync`
+- `Parallel` starts its own virtual thread per task with `CallableContext.wrap()` — not `Blockless.supplier()` or `CompletableFuture.supplyAsync`
 - `ContextPropagator` contract: `capture()` → `attach()` returns token → `restore(token)`. Restore in reverse order.
 - Class names describe function — don't brand things "Blockless*" unless about blocking-without-blocking
 - Don't add `synchronized` blocks — they pin virtual threads
