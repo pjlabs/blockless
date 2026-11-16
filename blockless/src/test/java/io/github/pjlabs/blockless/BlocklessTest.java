@@ -3,15 +3,79 @@ package io.github.pjlabs.blockless;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 class BlocklessTest {
+
+  @Test
+  @Timeout(5)
+  void interruptedStageWaiterDoesNotCorruptSharedOutcome() throws Exception {
+    final var stage = new CompletableFuture<String>();
+    final var supplier = Blockless.supplier(stage);
+    assertInterruptedWaiterIsIsolated(supplier);
+    stage.complete("done");
+    assertEquals("done", supplier.get());
+    assertEquals("done", supplier.get());
+  }
+
+  @Test
+  @Timeout(5)
+  void interruptedCallableWaiterDoesNotCorruptSharedOutcome() throws Exception {
+    final var release = new CountDownLatch(1);
+    final var supplier =
+        Blockless.supplier(
+            () -> {
+              release.await();
+              return "done";
+            });
+    try {
+      assertInterruptedWaiterIsIsolated(supplier);
+    } finally {
+      release.countDown();
+    }
+    assertEquals("done", supplier.get());
+    assertEquals("done", supplier.get());
+  }
+
+  private void assertInterruptedWaiterIsIsolated(Supplier<String> supplier) throws Exception {
+    final var waiting = new CountDownLatch(1);
+    final var result =
+        new FutureTask<Void>(
+            () -> {
+              waiting.countDown();
+              final var thrown = assertThrows(RuntimeException.class, supplier::get);
+              assertInstanceOf(InterruptedException.class, thrown.getCause());
+              assertTrue(Thread.currentThread().isInterrupted());
+              return null;
+            });
+    final var waiter = Thread.ofVirtual().start(result);
+    waiting.await();
+    waiter.interrupt();
+    result.get(2, TimeUnit.SECONDS);
+  }
+
+  @Test
+  @Timeout(5)
+  void callableErrorPublishesFailureAndReleasesWaiters() {
+    final var error = new AssertionError("failed");
+    final var supplier =
+        Blockless.supplier(
+            () -> {
+              throw error;
+            });
+    assertSame(error, assertThrows(RuntimeException.class, supplier::get).getCause());
+  }
 
   @Nested
   class GetCompletionStage {
@@ -61,7 +125,7 @@ class BlocklessTest {
     @Test
     void worksRegardlessOfCompletingExecutor() {
       // Stage completes on ForkJoinPool (default) — Blockless.get should
-      // still work because it uses its own virtual thread + latch, not the
+      // still work because it waits on its own latch, not the
       // stage's executor
       final var stage =
           CompletableFuture.supplyAsync(

@@ -31,19 +31,18 @@ var answer = Blockless.get(() -> expensiveComputation());
 If that implementation uses `synchronized` or you're on a platform thread, you
 could block or pin.
 
-`Blockless.get()` never enters the `CompletionStage` internals. It waits on a
-virtual thread via a `CountDownLatch` — your thread is never at risk, regardless
-of what the stage does internally.
+`Blockless.get()` registers a completion callback and waits on a `CountDownLatch`
+through a shared `OutcomeSupplier`. It does not call the future's blocking methods
+or create an extra waiting thread. Virtual-thread callers park on the latch;
+platform-thread callers block until the outcome is available.
 
 ```java
-// Parks inside CompletableFuture internals — you're at the mercy of the implementation.
+// Wait inside CompletableFuture.
 String result = someFuture.join();
 
-// Waits on a virtual thread + latch. Your thread never touches the future. 🐉
+// Wait on the shared outcome's latch.
 String result = Blockless.get(someFuture);
 ```
-
-**Defensive coding:** `Blockless.get()` is safe whether your calling thread is a virtual thread or a platform thread. If a refactor, config change, or library upgrade silently changes what thread your code runs on, `.join()` could start blocking platform threads with no warning. `Blockless.get()` stays safe regardless — you don't have to know or care what thread you're on.
 
 Also works with callables — runs them on a virtual thread and blocks for the result:
 

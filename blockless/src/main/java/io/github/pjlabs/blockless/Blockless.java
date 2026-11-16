@@ -2,8 +2,6 @@ package io.github.pjlabs.blockless;
 
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 public class Blockless {
@@ -26,40 +24,9 @@ public class Blockless {
    * @return a supplier that will block until the completion stage is complete
    */
   public static <T> Supplier<T> supplier(CompletionStage<T> stage) {
-    final var result = new AtomicReference<T>();
-    final var throwable = new AtomicReference<Throwable>();
-    final var latch = new CountDownLatch(1);
-    stage.whenComplete(
-        (T v, Throwable t) -> {
-          if (t != null) {
-            throwable.set(t);
-          } else {
-            result.set(v);
-          }
-          latch.countDown();
-        });
-    final var thread =
-        Thread.startVirtualThread(
-            () -> {
-              try {
-                latch.await();
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throwable.set(e);
-              }
-            });
-    return () -> {
-      try {
-        thread.join();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throwable.set(e);
-      }
-      if (throwable.get() != null) {
-        throw wrapIfChecked(throwable.get());
-      }
-      return result.get();
-    };
+    final var outcome = new OutcomeSupplier<T>();
+    stage.whenComplete(outcome::complete);
+    return outcome;
   }
 
   /**
@@ -82,32 +49,19 @@ public class Blockless {
    * @return the value of the callable
    */
   public static <T> Supplier<T> supplier(Callable<T> callable) {
-    final var result = new AtomicReference<T>();
-    final var throwable = new AtomicReference<Throwable>();
-    final var thread =
-        Thread.startVirtualThread(
-            () -> {
-              try {
-                result.set(callable.call());
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throwable.set(e);
-              } catch (Exception e) {
-                throwable.set(e);
-              }
-            });
-    return () -> {
-      try {
-        thread.join();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throwable.set(e);
-      }
-      if (throwable.get() != null) {
-        throw wrapIfChecked(throwable.get());
-      }
-      return result.get();
-    };
+    final var outcome = new OutcomeSupplier<T>();
+    Thread.startVirtualThread(
+        () -> {
+          try {
+            outcome.complete(callable.call(), null);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            outcome.complete(null, e);
+          } catch (Throwable t) {
+            outcome.complete(null, t);
+          }
+        });
+    return outcome;
   }
 
   /**
@@ -120,15 +74,5 @@ public class Blockless {
    */
   public static <T> T get(Callable<T> callable) {
     return supplier(callable).get();
-  }
-
-  /**
-   * Rethrows RuntimeException subclasses directly; wraps checked exceptions in RuntimeException.
-   */
-  private static RuntimeException wrapIfChecked(Throwable t) {
-    if (t instanceof RuntimeException re) {
-      return re;
-    }
-    return new RuntimeException(t);
   }
 }
