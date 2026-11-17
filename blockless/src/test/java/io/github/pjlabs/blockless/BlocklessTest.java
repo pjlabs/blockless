@@ -7,7 +7,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -67,14 +70,21 @@ class BlocklessTest {
 
   @Test
   @Timeout(5)
-  void callableErrorPublishesFailureAndReleasesWaiters() {
-    final var error = new AssertionError("failed");
-    final var supplier =
-        Blockless.supplier(
-            () -> {
-              throw error;
-            });
-    assertSame(error, assertThrows(RuntimeException.class, supplier::get).getCause());
+  void rethrowsOriginalError() {
+    final var original = new AssertionError("worker failed");
+    assertSame(
+        original,
+        assertThrows(
+            AssertionError.class,
+            () ->
+                Blockless.get(
+                    () -> {
+                      throw original;
+                    })));
+    assertSame(
+        original,
+        assertThrows(
+            AssertionError.class, () -> Blockless.get(CompletableFuture.failedFuture(original))));
   }
 
   @Nested
@@ -123,6 +133,27 @@ class BlocklessTest {
     }
 
     @Test
+    @Timeout(10)
+    void interruptedWaitDoesNotAffectLaterCalls() throws Exception {
+      final var stage = new CompletableFuture<String>();
+      final var supplier = Blockless.supplier(stage);
+      final var interruptedCaller =
+          new FutureTask<>(
+              () -> {
+                Thread.currentThread().interrupt();
+                final var failure = assertThrows(RuntimeException.class, supplier::get);
+                assertInstanceOf(InterruptedException.class, failure.getCause());
+                return Thread.currentThread().isInterrupted();
+              });
+
+      Thread.startVirtualThread(interruptedCaller);
+      assertTrue(interruptedCaller.get(5, TimeUnit.SECONDS));
+
+      stage.complete("done");
+      assertEquals("done", supplier.get());
+    }
+
+    @Test
     void worksRegardlessOfCompletingExecutor() {
       // Stage completes on ForkJoinPool (default) — Blockless.get should
       // still work because it waits on its own latch, not the
@@ -142,6 +173,7 @@ class BlocklessTest {
   }
 
   @Nested
+  @Timeout(10)
   class GetCallable {
 
     @Test
@@ -198,6 +230,126 @@ class BlocklessTest {
 
       final var thrown = assertThrows(IllegalArgumentException.class, supplier::get);
       assertEquals("bad", thrown.getMessage());
+    }
+
+    @Test
+    void supplierCanBeReusedAfterCompletion() {
+      final var supplier = Blockless.supplier(() -> "done");
+
+      assertEquals("done", supplier.get());
+      assertEquals("done", supplier.get());
+      assertNull(Blockless.get(() -> null));
+    }
+
+    @Test
+    void completedSupplierReturnsResultToInterruptedCaller() {
+      final var supplier = Blockless.supplier(() -> "done");
+      assertEquals("done", supplier.get());
+
+      try {
+        Thread.currentThread().interrupt();
+        assertEquals("done", supplier.get());
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+
+      assertEquals("done", supplier.get());
+    }
+
+    @Test
+    void completedSupplierReturnsNullToInterruptedCaller() {
+      final var supplier = Blockless.supplier(() -> null);
+      assertNull(supplier.get());
+
+      try {
+        Thread.currentThread().interrupt();
+        assertNull(supplier.get());
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+
+      assertNull(supplier.get());
+    }
+
+    @Test
+    void completedSupplierRethrowsOriginalFailureToInterruptedCaller() {
+      final var original = new IllegalStateException("broken");
+      final var supplier =
+          Blockless.supplier(
+              () -> {
+                throw original;
+              });
+      assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+
+      try {
+        Thread.currentThread().interrupt();
+        assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+
+      assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+    }
+
+    @Test
+    void preservesCompletionAndCancellationExceptions() {
+      for (final var original :
+          List.of(
+              new CompletionException(new IllegalStateException("broken")),
+              new CancellationException("cancelled"))) {
+        final var supplier =
+            Blockless.supplier(
+                () -> {
+                  throw original;
+                });
+
+        assertSame(original, assertThrows(RuntimeException.class, supplier::get));
+        assertSame(original, assertThrows(RuntimeException.class, supplier::get));
+      }
+    }
+
+    @Test
+    void supplierCanBeReusedAfterFailure() {
+      final var original = new IllegalStateException("broken");
+      final var supplier =
+          Blockless.supplier(
+              () -> {
+                throw original;
+              });
+
+      assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+      assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
+    }
+
+    @Test
+    void interruptedCallerPreservesInterruptStatus() throws Exception {
+      final var releaseWorker = new CountDownLatch(1);
+      final var supplier =
+          Blockless.supplier(
+              () -> {
+                releaseWorker.await();
+                return "done";
+              });
+      final var interruptedCaller =
+          new FutureTask<>(
+              () -> {
+                Thread.currentThread().interrupt();
+                final var failure = assertThrows(RuntimeException.class, supplier::get);
+                assertInstanceOf(InterruptedException.class, failure.getCause());
+                return Thread.currentThread().isInterrupted();
+              });
+
+      try {
+        Thread.startVirtualThread(interruptedCaller);
+        assertTrue(interruptedCaller.get(5, TimeUnit.SECONDS));
+      } finally {
+        releaseWorker.countDown();
+      }
+
+      assertEquals("done", supplier.get());
     }
   }
 }

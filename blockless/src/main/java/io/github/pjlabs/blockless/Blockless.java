@@ -19,6 +19,8 @@ public class Blockless {
    * Returns a supplier that will block until the completion stage is complete. Use when you want to
    * eagerly run the completion stage now and get the result later in execution.
    *
+   * <p>An interruption while waiting affects only that invocation.
+   *
    * @param stage the completion stage
    * @param <T> the type of the value
    * @return a supplier that will block until the completion stage is complete
@@ -42,11 +44,14 @@ public class Blockless {
   }
 
   /**
-   * Runs the callable in a virtual thread and returns the value of the callable.
+   * Starts the callable on a virtual thread and returns a supplier that waits for its completion.
+   *
+   * <p>Once completed, the supplier reads the cached outcome without waiting, even if the caller is
+   * interrupted. An interruption while waiting affects only that invocation.
    *
    * @param callable a callable
    * @param <T> the type of the value
-   * @return the value of the callable
+   * @return a supplier that waits for the value of the callable
    */
   public static <T> Supplier<T> supplier(Callable<T> callable) {
     final var outcome = new OutcomeSupplier<T>();

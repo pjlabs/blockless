@@ -1,15 +1,30 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
+import java.nio.file.Files;
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import jdk.jfr.Recording;
+import jdk.jfr.consumer.RecordingFile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -29,6 +44,40 @@ class ParallelTest {
   @AfterEach
   void tearDown() {
     MDC.clear();
+  }
+
+  @Test
+  void preservesOriginalError() {
+    for (final var p : List.of(parallel, parallel.withTimeout(Duration.ofSeconds(30)))) {
+      final var original = new AssertionError("task failed");
+      assertSame(
+          original,
+          assertThrows(
+              AssertionError.class,
+              () ->
+                  p.async(
+                          () -> {
+                            throw original;
+                          })
+                      .get()));
+      assertSame(
+          original,
+          assertThrows(
+              AssertionError.class,
+              () ->
+                  p.map(
+                      List.of(1),
+                      item -> {
+                        throw original;
+                      })));
+      final var results =
+          p.toEither(
+              List.of(1),
+              item -> {
+                throw original;
+              });
+      assertSame(original, results.get(0).failure());
+    }
   }
 
   @Test
@@ -124,6 +173,41 @@ class ParallelTest {
   void asyncRunsOnVirtualThread() {
     final var supplier = parallel.async(() -> Thread.currentThread().isVirtual());
     assertTrue(supplier.get());
+  }
+
+  @Test
+  void asyncStartsOnlyTheWorkerThread() throws Exception {
+    final var workerIds = new HashSet<Long>();
+    final var startedIds =
+        startedVirtualThreadIds(
+            () -> {
+              for (final var p : List.of(parallel, parallel.withTimeout(Duration.ofSeconds(5)))) {
+                for (int i = 0; i < 50; i++) {
+                  workerIds.add(p.async(() -> Thread.currentThread().threadId()).get());
+                }
+              }
+            });
+
+    assertEquals(100, workerIds.size());
+    assertEquals(
+        workerIds, startedIds, "async() must not start virtual threads besides its worker");
+  }
+
+  private static Set<Long> startedVirtualThreadIds(Runnable action) throws Exception {
+    final var file = Files.createTempFile("virtual-thread-starts", ".jfr");
+    try (final var recording = new Recording()) {
+      recording.enable("jdk.VirtualThreadStart");
+      recording.start();
+      action.run();
+      recording.stop();
+      recording.dump(file);
+      return RecordingFile.readAllEvents(file).stream()
+          .filter(event -> event.getEventType().getName().equals("jdk.VirtualThreadStart"))
+          .map(event -> event.getLong("javaThreadId"))
+          .collect(Collectors.toSet());
+    } finally {
+      Files.deleteIfExists(file);
+    }
   }
 
   @Test
@@ -480,6 +564,299 @@ class ParallelTest {
   class Timeout {
 
     @Test
+    void interruptingAsyncWaiterInterruptsWorker() throws Exception {
+      final var started = new CountDownLatch(1);
+      final var interrupted = new CountDownLatch(1);
+      final var release = new CountDownLatch(1);
+      final var finished = new CountDownLatch(1);
+      final var supplier =
+          parallel
+              .withTimeout(Duration.ofSeconds(30))
+              .async(
+                  () -> {
+                    started.countDown();
+                    try {
+                      release.await();
+                      return "done";
+                    } catch (InterruptedException e) {
+                      interrupted.countDown();
+                      Thread.currentThread().interrupt();
+                      throw new RuntimeException(e);
+                    } finally {
+                      finished.countDown();
+                    }
+                  });
+      final var waiting = new FutureTask<>(supplier::get);
+      final var caller = Thread.startVirtualThread(waiting);
+      try {
+        assertTrue(started.await(3, TimeUnit.SECONDS));
+        caller.interrupt();
+        final var failure =
+            assertThrows(ExecutionException.class, () -> waiting.get(3, TimeUnit.SECONDS));
+        assertInstanceOf(InterruptedException.class, failure.getCause().getCause());
+        assertTrue(interrupted.await(3, TimeUnit.SECONDS));
+      } finally {
+        release.countDown();
+        caller.interrupt();
+        caller.join(3000);
+        assertFalse(caller.isAlive());
+        assertTrue(finished.await(3, TimeUnit.SECONDS));
+      }
+    }
+
+    @Test
+    void mapFailureInterruptsSiblingWorkerWithTimeoutEnabled() throws InterruptedException {
+      final var siblingStarted = new CountDownLatch(1);
+      final var siblingInterrupted = new CountDownLatch(1);
+      final var release = new CountDownLatch(1);
+      final var siblingFinished = new CountDownLatch(1);
+      final var original = new IllegalArgumentException("failed");
+      try {
+        final var failure =
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(3),
+                () ->
+                    assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                            parallel
+                                .withMaxConcurrency(2)
+                                .withTimeout(Duration.ofSeconds(30))
+                                .map(
+                                    List.of(1, 2),
+                                    i -> {
+                                      if (i == 1) {
+                                        try {
+                                          if (!siblingStarted.await(3, TimeUnit.SECONDS)) {
+                                            throw new IllegalStateException(
+                                                "sibling did not start");
+                                          }
+                                        } catch (InterruptedException e) {
+                                          throw new RuntimeException(e);
+                                        }
+                                        throw original;
+                                      }
+                                      siblingStarted.countDown();
+                                      try {
+                                        release.await();
+                                        return i;
+                                      } catch (InterruptedException e) {
+                                        siblingInterrupted.countDown();
+                                        Thread.currentThread().interrupt();
+                                        throw new RuntimeException(e);
+                                      } finally {
+                                        siblingFinished.countDown();
+                                      }
+                                    })));
+        assertSame(original, failure);
+        assertTrue(
+            siblingInterrupted.await(3, TimeUnit.SECONDS),
+            "map failure must interrupt the actual sibling worker, not just a waiter");
+      } finally {
+        release.countDown();
+        assertTrue(siblingFinished.await(3, TimeUnit.SECONDS));
+      }
+    }
+
+    @Test
+    void timedOutWorkerRetainsSlotUntilItExits() throws Exception {
+      final var release = new CountDownLatch(1);
+      final var interrupted = new CountDownLatch(1);
+      final var nextStarted = new CountDownLatch(1);
+      final var active = new AtomicInteger();
+      final var maxActive = new AtomicInteger();
+      final var batch =
+          new FutureTask<>(
+              () ->
+                  parallel
+                      .withMaxConcurrency(1)
+                      .withTimeout(Duration.ofMillis(100))
+                      .toEither(
+                          List.of(1, 2),
+                          i -> {
+                            maxActive.accumulateAndGet(active.incrementAndGet(), Math::max);
+                            try {
+                              if (i == 1) {
+                                return waitIgnoringInterrupts(release, interrupted);
+                              }
+                              nextStarted.countDown();
+                              return "next";
+                            } finally {
+                              active.decrementAndGet();
+                            }
+                          }));
+      final var caller = Thread.startVirtualThread(batch);
+      try {
+        assertTrue(interrupted.await(3, TimeUnit.SECONDS));
+        assertFalse(
+            nextStarted.await(200, TimeUnit.MILLISECONDS),
+            "timeout must not free the worker's concurrency slot");
+        assertFalse(batch.isDone(), "queued items still need a worker slot");
+        release.countDown();
+
+        final var results = batch.get(3, TimeUnit.SECONDS);
+        assertInstanceOf(TimeoutException.class, results.get(0).failure());
+        assertEquals("next", results.get(1).result());
+        assertEquals(1, maxActive.get());
+      } finally {
+        release.countDown();
+        caller.interrupt();
+        caller.join(3000);
+        assertFalse(caller.isAlive());
+      }
+    }
+
+    @Test
+    void timedAsyncCapturesAndRestoresContextOnce() {
+      final var captures = new AtomicInteger();
+      final var attaches = new AtomicInteger();
+      final var restores = new AtomicInteger();
+      final var propagator =
+          new ContextPropagator() {
+            @Override
+            public Object capture() {
+              captures.incrementAndGet();
+              return null;
+            }
+
+            @Override
+            public Object attach(Object captured) {
+              attaches.incrementAndGet();
+              return null;
+            }
+
+            @Override
+            public void restore(Object previous) {
+              restores.incrementAndGet();
+            }
+          };
+
+      assertEquals(
+          "ok",
+          Parallel.create(propagator).withTimeout(Duration.ofSeconds(5)).async(() -> "ok").get());
+      assertEquals(1, captures.get());
+      assertEquals(1, attaches.get());
+      assertEquals(1, restores.get());
+    }
+
+    @Test
+    void asyncTimesOutEvenWhenTaskIgnoresInterruption() throws InterruptedException {
+      final var release = new CountDownLatch(1);
+      final var interrupted = new CountDownLatch(1);
+      final var finished = new CountDownLatch(1);
+      final var supplier =
+          parallel
+              .withTimeout(Duration.ofMillis(100))
+              .async(
+                  () -> {
+                    try {
+                      return waitIgnoringInterrupts(release, interrupted);
+                    } finally {
+                      finished.countDown();
+                    }
+                  });
+
+      try {
+        final var failure =
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(3), () -> assertThrows(RuntimeException.class, supplier::get));
+        assertInstanceOf(TimeoutException.class, failure.getCause());
+        assertTrue(interrupted.await(3, TimeUnit.SECONDS));
+        assertEquals(1, finished.getCount(), "caller must return before the task finishes");
+      } finally {
+        release.countDown();
+        assertTrue(finished.await(3, TimeUnit.SECONDS));
+      }
+    }
+
+    @Test
+    void mapTimesOutEvenWhenTaskIgnoresInterruption() {
+      final var release = new CountDownLatch(1);
+      try {
+        final var failure =
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(3),
+                () ->
+                    assertThrows(
+                        RuntimeException.class,
+                        () ->
+                            parallel
+                                .withTimeout(Duration.ofMillis(100))
+                                .map(
+                                    List.of(1),
+                                    i -> waitIgnoringInterrupts(release, new CountDownLatch(1)))));
+        assertInstanceOf(TimeoutException.class, failure.getCause());
+      } finally {
+        release.countDown();
+      }
+    }
+
+    @Test
+    void toEitherCollectsTimeoutAndSuccess() {
+      final var release = new CountDownLatch(1);
+      try {
+        final var results =
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(3),
+                () ->
+                    parallel
+                        .withTimeout(Duration.ofMillis(100))
+                        .toEither(
+                            List.of(1, 2),
+                            i ->
+                                i == 1
+                                    ? waitIgnoringInterrupts(release, new CountDownLatch(1))
+                                    : "ok"));
+        assertInstanceOf(TimeoutException.class, results.get(0).failure());
+        assertEquals("ok", results.get(1).result());
+      } finally {
+        release.countDown();
+      }
+    }
+
+    @Test
+    void asyncPreservesContextAndRunsOnVirtualThread() {
+      MDC.put("traceId", "timed-parent");
+      final var supplier =
+          parallel
+              .withTimeout(Duration.ofSeconds(5))
+              .async(
+                  () -> {
+                    assertTrue(Thread.currentThread().isVirtual());
+                    final var traceId = MDC.get("traceId");
+                    MDC.put("traceId", "timed-child");
+                    return traceId;
+                  });
+
+      assertEquals("timed-parent", supplier.get());
+      assertEquals("timed-parent", MDC.get("traceId"));
+    }
+
+    @Test
+    void preservesTaskFailureBeforeTimeout() {
+      final var original = new IllegalArgumentException("failed");
+      final var supplier =
+          parallel
+              .withTimeout(Duration.ofSeconds(5))
+              .async(
+                  () -> {
+                    throw original;
+                  });
+      assertSame(original, assertThrows(IllegalArgumentException.class, supplier::get));
+    }
+
+    private String waitIgnoringInterrupts(CountDownLatch release, CountDownLatch interrupted) {
+      while (true) {
+        try {
+          release.await();
+          return "late result";
+        } catch (InterruptedException ignored) {
+          interrupted.countDown();
+        }
+      }
+    }
+
+    @Test
     void completesWithinTimeout() {
       final var timedParallel =
           Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofSeconds(5));
@@ -523,6 +900,93 @@ class ParallelTest {
               .withTimeout(Duration.ofSeconds(5));
       final var results = timedParallel.map(List.of(1, 2, 3, 4), i -> i * 10);
       assertEquals(List.of(10, 20, 30, 40), results);
+    }
+
+    @Test
+    void batchCanOutlastPerTaskTimeout() {
+      final var timedParallel = parallel.withMaxConcurrency(1).withTimeout(Duration.ofMillis(100));
+      final var items = IntStream.range(0, 10).boxed().toList();
+      final var started = System.nanoTime();
+
+      final var results =
+          assertTimeoutPreemptively(
+              Duration.ofSeconds(1),
+              () ->
+                  timedParallel.map(
+                      items,
+                      item -> {
+                        try {
+                          Thread.sleep(Duration.ofMillis(50));
+                        } catch (InterruptedException e) {
+                          Thread.currentThread().interrupt();
+                          throw new RuntimeException(e);
+                        }
+                        return item;
+                      }));
+
+      assertEquals(items, results, "all ten tasks must finish within their individual timeout");
+      assertTrue(
+          System.nanoTime() - started >= Duration.ofMillis(500).toNanos(),
+          "the sequential batch must be allowed to take 500 ms despite a 100 ms timeout");
+    }
+
+    @Test
+    void mapFailsWithinOneSecondWhenTaskExceedsTimeout() throws InterruptedException {
+      final var timedParallel = parallel.withMaxConcurrency(1).withTimeout(Duration.ofMillis(100));
+      final var items = IntStream.range(0, 10).boxed().toList();
+      final var interrupted = new CountDownLatch(1);
+
+      final var failure =
+          assertTimeoutPreemptively(
+              Duration.ofSeconds(1),
+              () ->
+                  assertThrows(
+                      RuntimeException.class,
+                      () ->
+                          timedParallel.map(
+                              items,
+                              item -> {
+                                try {
+                                  Thread.sleep(Duration.ofMillis(200));
+                                } catch (InterruptedException e) {
+                                  interrupted.countDown();
+                                  Thread.currentThread().interrupt();
+                                  throw new RuntimeException(e);
+                                }
+                                return item;
+                              })));
+
+      assertInstanceOf(TimeoutException.class, failure.getCause());
+      assertTrue(interrupted.await(1, TimeUnit.SECONDS), "the timed-out task must be interrupted");
+    }
+
+    @Test
+    void toEitherCollectsFiveTimeoutsWithinOneSecond() {
+      final var timedParallel = parallel.withMaxConcurrency(1).withTimeout(Duration.ofMillis(100));
+      final var items = IntStream.range(0, 5).boxed().toList();
+      final var started = System.nanoTime();
+
+      final var results =
+          assertTimeoutPreemptively(
+              Duration.ofSeconds(1),
+              () ->
+                  timedParallel.toEither(
+                      items,
+                      item -> {
+                        try {
+                          Thread.sleep(Duration.ofMillis(200));
+                        } catch (InterruptedException e) {
+                          Thread.currentThread().interrupt();
+                          throw new RuntimeException(e);
+                        }
+                        return item;
+                      }));
+
+      assertEquals(5, results.size());
+      results.forEach(result -> assertInstanceOf(TimeoutException.class, result.failure()));
+      assertTrue(
+          System.nanoTime() - started >= Duration.ofMillis(500).toNanos(),
+          "five sequential task timeouts must take at least 500 ms");
     }
 
     @Test

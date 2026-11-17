@@ -19,14 +19,19 @@ final class OutcomeSupplier<T> implements Supplier<T> {
 
   @Override
   public T get() {
-    try {
-      latch.await();
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      throw new RuntimeException(e);
+    if (latch.getCount() != 0) {
+      try {
+        latch.await();
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new RuntimeException(e);
+      }
     }
     if (failure instanceof RuntimeException runtimeException) {
       throw runtimeException;
+    }
+    if (failure instanceof Error error) {
+      throw error;
     }
     if (failure != null) {
       throw new RuntimeException(failure);
