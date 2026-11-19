@@ -29,6 +29,7 @@ Java 21 required. No preview features.
 
 - `Blockless.get(CompletionStage)` waits via virtual thread + `CountDownLatch` — never enters the future's internals
 - `Parallel` starts its own virtual thread per task with `CallableContext.wrap()` — not `Blockless.supplier()` or `CompletableFuture.supplyAsync`
+- Two separate limits: `withMaxConcurrency` is a per-call sliding window (bounds virtual threads per batch); `withSharedLimit(Semaphore)` is the cross-call limit that protects a downstream service. Don't merge them
 - `ContextPropagator` contract: `capture()` → `attach()` returns token → `restore(token)`. Restore in reverse order.
 - Class names describe function — don't brand things "Blockless*" unless about blocking-without-blocking
 - Don't add `synchronized` blocks — they pin virtual threads
