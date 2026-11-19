@@ -80,8 +80,10 @@ public final class Parallel {
    * #map} and {@link #async} wrap it in {@link RuntimeException}; {@link #toEither} collects it as
    * a failed {@link Either}.
    *
-   * <p>The timeout starts when each task is launched; time queued for a concurrency slot does not
-   * count. This is a per-task timeout, not a deadline for the batch.
+   * <p>The worker thread is started before its timeout is registered. The configured duration is
+   * measured from registration, so time queued for a concurrency slot and any delay before timeout
+   * registration do not count. This is a per-task timeout, not a deadline from submission or for
+   * the batch.
    *
    * <p>A timeout settles the task's result and interrupts its worker without waiting for cleanup.
    * Code that ignores interruption may keep running after its result has timed out. Callers remain
