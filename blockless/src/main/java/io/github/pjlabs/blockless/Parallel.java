@@ -314,7 +314,7 @@ public final class Parallel {
                   } catch (Throwable failure) {
                     // Keep task exceptions intact: exceptionNow unwraps one CompletionException,
                     // and an unwrapped CancellationException would mark the result as cancelled.
-                    result.completeExceptionally(new CompletionException(failure));
+                    result.completeExceptionally(new CompletionException(null, failure));
                   } finally {
                     onWorkerExit.run();
                   }

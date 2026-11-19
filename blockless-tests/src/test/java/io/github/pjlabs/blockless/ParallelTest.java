@@ -657,6 +657,26 @@ class ParallelTest {
     }
 
     @Test
+    void asyncCompletesWhenTaskExceptionToStringThrows() {
+      final var original =
+          new IllegalStateException() {
+            @Override
+            public String toString() {
+              throw new UnsupportedOperationException("toString");
+            }
+          };
+      final var supplier =
+          parallel.async(
+              () -> {
+                throw original;
+              });
+
+      assertTimeoutPreemptively(
+          Duration.ofSeconds(3),
+          () -> assertSame(original, assertThrows(IllegalStateException.class, supplier::get)));
+    }
+
+    @Test
     void timeoutOverflowFailsBeforeTaskStarts() throws InterruptedException {
       final var ran = new AtomicBoolean();
       final var overflowing = parallel.withTimeout(Duration.ofSeconds(Long.MAX_VALUE));
