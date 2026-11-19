@@ -28,7 +28,13 @@ public class Blockless {
    */
   public static <T> Supplier<T> supplier(CompletionStage<T> stage) {
     final var outcome = new OutcomeSupplier<T>();
-    stage.whenComplete(outcome::complete);
+    // handle, not whenComplete: on JDK 21, whenComplete on a failed stage wraps the failure in
+    // new CompletionException(failure), which calls its toString and can throw.
+    stage.handle(
+        (value, failure) -> {
+          outcome.complete(value, failure);
+          return null;
+        });
     return outcome;
   }
 
