@@ -19,7 +19,8 @@ public class Blockless {
    * Returns a supplier that will block until the completion stage is complete. Use when you want to
    * eagerly run the completion stage now and get the result later in execution.
    *
-   * <p>An interruption while waiting affects only that invocation.
+   * <p>Once completed, the supplier reads the cached outcome without waiting, even if the caller is
+   * interrupted. An interruption while waiting affects only that invocation.
    *
    * @param stage the completion stage
    * @param <T> the type of the value

@@ -9,17 +9,21 @@ final class OutcomeSupplier<T> implements Supplier<T> {
   private final CountDownLatch latch = new CountDownLatch(1);
   private T value;
   private Throwable failure;
+  // Written after value and failure: a caller that reads true also sees both fields.
+  private volatile boolean completed;
 
-  /** Called once by the producer; the latch publishes both fields to all waiting callers. */
+  /** Called once by the producer; publishes the outcome to all current and later callers. */
   void complete(T value, Throwable failure) {
     this.value = value;
     this.failure = failure;
+    completed = true;
     latch.countDown();
   }
 
   @Override
   public T get() {
-    if (latch.getCount() != 0) {
+    // Skip await() once completed, so an interrupted caller still gets the outcome.
+    if (!completed) {
       try {
         latch.await();
       } catch (InterruptedException e) {

@@ -11,14 +11,15 @@ A tiny Java 21 library for virtual thread concurrency. Two things:
 1. **`Blockless.get()`** — wait for async results safely, without entering the future's internals
 2. **`Parallel`** — fan out work on virtual threads, collect results, keep your trace context
 
-So your platform threads stay free and your context tags along for the ride.
+So you can wait on async results without calling their blocking methods, and your context tags
+along for the ride.
 
 Zero dependencies in core. Pluggable context propagation for MDC, gRPC, and OpenTelemetry.
 
 ## Quick start
 
 ```java
-// Wait for a CompletionStage without blocking platform threads
+// Wait for a CompletionStage without calling its blocking methods
 var result = Blockless.get(CompletableFuture.supplyAsync(() -> "hello"));
 
 // Run a Callable on a virtual thread and get the result
