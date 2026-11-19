@@ -1071,7 +1071,8 @@ class ParallelTest {
           () -> assertEquals(items, limited.map(items, this::callExternalService)));
 
       assertTrue(peak.get() <= 3, "expected max 3 across both calls, but was " + peak.get());
-      assertEquals(3, limit.availablePermits());
+      // A worker publishes its result before it releases its permit, so wait for the release.
+      awaitCondition(() -> limit.availablePermits() == 3);
     }
 
     @Test
@@ -1090,11 +1091,12 @@ class ParallelTest {
           () -> second.toEither(items, this::callExternalService));
 
       assertTrue(peak.get() <= 2, "expected max 2 across both instances, but was " + peak.get());
-      assertEquals(2, limit.availablePermits());
+      // A worker publishes its result before it releases its permit, so wait for the release.
+      awaitCondition(() -> limit.availablePermits() == 2);
     }
 
     @Test
-    void appliesToAsync() {
+    void appliesToAsync() throws Exception {
       final var limit = new Semaphore(2);
       final var limited = parallel.withSharedLimit(limit);
 
@@ -1103,7 +1105,8 @@ class ParallelTest {
       suppliers.forEach(Supplier::get);
 
       assertTrue(peak.get() <= 2, "expected max 2 async tasks, but was " + peak.get());
-      assertEquals(2, limit.availablePermits());
+      // A worker publishes its result before it releases its permit, so wait for the release.
+      awaitCondition(() -> limit.availablePermits() == 2);
     }
 
     @Test
