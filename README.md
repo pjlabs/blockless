@@ -121,7 +121,9 @@ is shared. Combine both for large batches. Don't wait for tasks that use the sam
 inside one of its tasks: if every permit is held by a waiting task, they deadlock.
 
 Timeouts apply to each task after it is launched. Time queued for a concurrency slot or a shared-limit
-permit does not count, and the task timeout is not a deadline for the batch. `map()` throws a wrapped `TimeoutException`,
+permit does not count, and the task timeout is not a deadline for the batch. It also does not bound
+the wait for a permit: if every permit is held by tasks that ignore interruption, callers block until
+one of them exits. `map()` throws a wrapped `TimeoutException`,
 while `toEither()` collects it as `Either.fail()` and continues processing the other items.
 
 On failure, `map()` interrupts the other active workers without waiting for their cleanup. A task

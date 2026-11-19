@@ -106,7 +106,9 @@ public final class Parallel {
    * <p>Each task waits for its permit on its own virtual thread, so {@link #async} still returns
    * immediately. Waiting is interruptible: a task cancelled while waiting never runs. With {@link
    * #withTimeout(Duration)}, the timeout starts once the task holds its permit. The permit is
-   * released when the task's worker exits, so a timed-out task that is still running keeps it.
+   * released when the task's worker exits, so a timed-out task that is still running keeps it. The
+   * timeout does not bound the wait for a permit: if every permit is held by tasks that ignore
+   * interruption, waiting callers block until one of those tasks exits.
    *
    * <p>Do not wait from inside a task for other tasks that use the same semaphore, for example by
    * calling {@link #map} or {@code async(...).get()}. If every permit is held by a task waiting in
