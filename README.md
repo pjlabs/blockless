@@ -38,10 +38,10 @@ or create an extra waiting thread. Virtual-thread callers park on the latch;
 platform-thread callers block until the outcome is available.
 
 ```java
-// Wait inside CompletableFuture.
+// Wait inside CompletableFuture. May run other pending callbacks on the caller thread.
 String result = someFuture.join();
 
-// Wait on the shared outcome's latch.
+// Wait on a latch released by a completion callback. The wait itself runs no callbacks.
 String result = Blockless.get(someFuture);
 ```
 
