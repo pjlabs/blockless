@@ -31,7 +31,7 @@ import java.util.function.Supplier;
  * window — at most N calculations are active per batch. Tasks are collected in completion order to
  * avoid head-of-line blocking, but results are always returned in input order. Each call gets its
  * own window. To cap concurrency across calls, threads and instances, for example requests to one
- * downstream service, use {@link #withSharedLimit(Semaphore)}.
+ * external service, use {@link #withSharedLimit(Semaphore)}.
  *
  * <p>Callers own the resources used by submitted calculations and are responsible for their
  * cleanup. Submitted code must handle interruption and resources being closed after a batch returns
@@ -88,20 +88,20 @@ public final class Parallel {
 
   /**
    * Returns a new {@link Parallel} whose tasks each run only while holding a permit from {@code
-   * limit}. Create one {@link Semaphore} per downstream dependency and keep it, for example in a
-   * field, so every call, thread and instance that uses it shares the same limit:
+   * limit}. Create one {@link Semaphore} per external service and keep it, for example in a field,
+   * so every call, thread and instance that uses it shares the same limit:
    *
    * <pre>{@code
-   * static final Semaphore PARTNER_API = new Semaphore(10);
+   * static final Semaphore USER_SERVICE_LIMIT = new Semaphore(10);
    *
-   * var partner = Parallel.create(propagators).withSharedLimit(PARTNER_API);
-   * partner.map(ids, id -> fetch(id)); // at most 10 fetches in flight across all callers
+   * var userService = Parallel.create(propagators).withSharedLimit(USER_SERVICE_LIMIT);
+   * userService.map(ids, id -> fetchUser(id)); // at most 10 calls in flight across all callers
    * }</pre>
    *
    * <p>The limit applies to {@link #async}, {@link #map}, {@link #asMap}, {@link #toEither} and
    * {@link #toEitherMap}. It combines with {@link #withMaxConcurrency(int)}: the shared limit
-   * protects the dependency, and the per-call window stops a large batch from starting a virtual
-   * thread for every item up front.
+   * protects the external service, and the per-call window stops a large batch from starting a
+   * virtual thread for every item up front.
    *
    * <p>Each task waits for its permit on its own virtual thread, so {@link #async} still returns
    * immediately. Waiting is interruptible: a task cancelled while waiting never runs. With {@link
@@ -359,7 +359,9 @@ public final class Parallel {
                       // Interruptible, so cancelling a waiting task stops it before it runs.
                       sharedLimit.acquire();
                       holdsPermit = true;
-                      if (result.isDone()) {
+                      // cancel() interrupts before it cancels the result, so check both.
+                      if (result.isDone() || Thread.currentThread().isInterrupted()) {
+                        result.completeExceptionally(new InterruptedException());
                         return; // cancelled while waiting for the permit
                       }
                       startTimeout(result);

@@ -1016,8 +1016,8 @@ class ParallelTest {
     private final AtomicInteger current = new AtomicInteger();
     private final AtomicInteger peak = new AtomicInteger();
 
-    /** Simulates a 50 ms call to a downstream service and records peak concurrency. */
-    private int callDependency(int item) {
+    /** Simulates a 50 ms call to an external service and records peak concurrency. */
+    private int callExternalService(int item) {
       final var now = current.incrementAndGet();
       peak.accumulateAndGet(now, Math::max);
       try {
@@ -1067,8 +1067,8 @@ class ParallelTest {
       final var items = IntStream.range(0, 12).boxed().toList();
 
       runSimultaneously(
-          () -> assertEquals(items, limited.map(items, this::callDependency)),
-          () -> assertEquals(items, limited.map(items, this::callDependency)));
+          () -> assertEquals(items, limited.map(items, this::callExternalService)),
+          () -> assertEquals(items, limited.map(items, this::callExternalService)));
 
       assertTrue(peak.get() <= 3, "expected max 3 across both calls, but was " + peak.get());
       assertEquals(3, limit.availablePermits());
@@ -1086,8 +1086,8 @@ class ParallelTest {
       final var items = IntStream.range(0, 8).boxed().toList();
 
       runSimultaneously(
-          () -> first.map(items, this::callDependency),
-          () -> second.toEither(items, this::callDependency));
+          () -> first.map(items, this::callExternalService),
+          () -> second.toEither(items, this::callExternalService));
 
       assertTrue(peak.get() <= 2, "expected max 2 across both instances, but was " + peak.get());
       assertEquals(2, limit.availablePermits());
@@ -1099,7 +1099,7 @@ class ParallelTest {
       final var limited = parallel.withSharedLimit(limit);
 
       final var suppliers =
-          IntStream.range(0, 8).mapToObj(i -> limited.async(() -> callDependency(i))).toList();
+          IntStream.range(0, 8).mapToObj(i -> limited.async(() -> callExternalService(i))).toList();
       suppliers.forEach(Supplier::get);
 
       assertTrue(peak.get() <= 2, "expected max 2 async tasks, but was " + peak.get());
@@ -1128,7 +1128,7 @@ class ParallelTest {
                     if (i == 3) {
                       throw new IllegalStateException("failed");
                     }
-                    return callDependency(i);
+                    return callExternalService(i);
                   }));
 
       // map() does not wait for cancelled workers to exit, so wait for their permits.
@@ -1172,7 +1172,7 @@ class ParallelTest {
       final var items = IntStream.range(0, 5).boxed().toList();
 
       // Each task runs for 50 ms, but the last one waits about 200 ms for the only permit.
-      assertEquals(items, limited.map(items, this::callDependency));
+      assertEquals(items, limited.map(items, this::callExternalService));
     }
 
     @Test

@@ -98,9 +98,10 @@ Map<String, Profile> profiles = parallel.asMap(userIds, id -> loadProfile(id));
 var boundedParallel = parallel.withMaxConcurrency(10);
 List<String> names = boundedParallel.map(userIds, id -> fetchName(id));
 
-// Cap calls to a downstream service across ALL requests: share one Semaphore
-static final Semaphore PARTNER_API = new Semaphore(10);
-var partnerParallel = parallel.withSharedLimit(PARTNER_API);
+// Cap calls to one external service across ALL requests: share one Semaphore,
+// held in a field, e.g. static final Semaphore USER_SERVICE_LIMIT = new Semaphore(10);
+var userService = parallel.withSharedLimit(USER_SERVICE_LIMIT);
+List<String> names = userService.map(userIds, id -> fetchName(id));
 
 // Per-task timeout — result fails and worker is interrupted at the deadline
 var timedParallel = parallel.withTimeout(Duration.ofSeconds(5));
@@ -115,7 +116,7 @@ List<Either<String, Throwable>> results = parallel.toEither(ids, id -> riskyFetc
 
 `withMaxConcurrency` limits each call separately: two simultaneous requests can run 2 × N tasks.
 `withSharedLimit` limits every call, thread and `Parallel` instance that uses the same `Semaphore`,
-including `async()`. Use it to protect a downstream service, and keep the semaphore in a field so it
+including `async()`. Use it to protect an external service, and keep the semaphore in a field so it
 is shared. Combine both for large batches. Don't wait for tasks that use the same semaphore from
 inside one of its tasks: if every permit is held by a waiting task, they deadlock.
 
