@@ -850,17 +850,6 @@ class ParallelTest {
       assertSame(original, assertThrows(IllegalArgumentException.class, supplier::get));
     }
 
-    private String waitIgnoringInterrupts(CountDownLatch release, CountDownLatch interrupted) {
-      while (true) {
-        try {
-          release.await();
-          return "late result";
-        } catch (InterruptedException ignored) {
-          interrupted.countDown();
-        }
-      }
-    }
-
     @Test
     void completesWithinTimeout() {
       final var timedParallel =
@@ -1202,20 +1191,21 @@ class ParallelTest {
       awaitCondition(() -> limit.availablePermits() == 1);
     }
 
-    private String waitIgnoringInterrupts(CountDownLatch release, CountDownLatch interrupted) {
-      while (true) {
-        try {
-          release.await();
-          return "late result";
-        } catch (InterruptedException ignored) {
-          interrupted.countDown();
-        }
-      }
-    }
-
     @Test
     void rejectsNullLimit() {
       assertThrows(NullPointerException.class, () -> parallel.withSharedLimit(null));
+    }
+  }
+
+  /** Blocks until {@code release} opens, counting down {@code interrupted} on each interrupt. */
+  private static String waitIgnoringInterrupts(CountDownLatch release, CountDownLatch interrupted) {
+    while (true) {
+      try {
+        release.await();
+        return "late result";
+      } catch (InterruptedException ignored) {
+        interrupted.countDown();
+      }
     }
   }
 }
