@@ -9,8 +9,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -272,15 +272,14 @@ public final class Parallel {
       try {
         latch.await();
       } catch (InterruptedException e) {
-        cancel();
+        // Interruption ends only this caller's wait; other callers still share the outcome.
         Thread.currentThread().interrupt();
         throw new RuntimeException(e);
       }
       return switch (result.state()) {
         case SUCCESS -> result.resultNow();
         case FAILED -> throw wrapIfNeeded(result.exceptionNow());
-        case CANCELLED -> throw new CancellationException();
-        case RUNNING -> throw new IllegalStateException("Result not completed");
+        case CANCELLED, RUNNING -> throw new IllegalStateException("Result not completed");
       };
     }
   }
@@ -300,6 +299,8 @@ public final class Parallel {
 
   private <T> VirtualTask<T> startTask(
       Supplier<T> task, BiConsumer<T, Throwable> onResult, Runnable onWorkerExit) {
+    // Convert before starting the worker: an overflow here must not leave untracked work running.
+    final var timeoutNanos = timeout == null ? 0 : timeout.toNanos();
     final var result = new CompletableFuture<T>();
     final var latch = new CountDownLatch(1);
     final var callable = CallableContext.<T>wrap(task::get, propagators);
@@ -311,7 +312,9 @@ public final class Parallel {
                     final var value = callable.call();
                     result.complete(value);
                   } catch (Throwable failure) {
-                    result.completeExceptionally(failure);
+                    // Keep task exceptions intact: exceptionNow unwraps one CompletionException,
+                    // and an unwrapped CancellationException would mark the result as cancelled.
+                    result.completeExceptionally(new CompletionException(failure));
                   } finally {
                     onWorkerExit.run();
                   }
@@ -323,7 +326,9 @@ public final class Parallel {
             if (timeout != null && failure instanceof TimeoutException) {
               worker.interrupt();
             }
-            onResult.accept(value, failure);
+            onResult.accept(
+                value,
+                failure instanceof CompletionException wrapped ? wrapped.getCause() : failure);
           } finally {
             latch.countDown();
           }
@@ -331,7 +336,7 @@ public final class Parallel {
 
     worker.start();
     if (timeout != null) {
-      result.orTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS);
+      result.orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
     }
     return new VirtualTask<>(worker, result, latch);
   }
