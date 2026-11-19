@@ -99,9 +99,9 @@ var boundedParallel = parallel.withMaxConcurrency(10);
 List<String> names = boundedParallel.map(userIds, id -> fetchName(id));
 
 // Cap calls to one external service across ALL requests: share one Semaphore,
-// held in a field, e.g. static final Semaphore USER_SERVICE_LIMIT = new Semaphore(10);
-var userService = parallel.withSharedLimit(USER_SERVICE_LIMIT);
-List<String> names = userService.map(userIds, id -> fetchName(id));
+// held in a field, e.g. static final Semaphore EXTERNAL_SERVICE_LIMIT = new Semaphore(10);
+var externalService = parallel.withSharedLimit(EXTERNAL_SERVICE_LIMIT);
+List<String> names = externalService.map(userIds, id -> fetchName(id));
 
 // Per-task timeout — result fails and worker is interrupted at the deadline
 var timedParallel = parallel.withTimeout(Duration.ofSeconds(5));

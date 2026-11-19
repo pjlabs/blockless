@@ -92,10 +92,10 @@ public final class Parallel {
    * so every call, thread and instance that uses it shares the same limit:
    *
    * <pre>{@code
-   * static final Semaphore USER_SERVICE_LIMIT = new Semaphore(10);
+   * static final Semaphore EXTERNAL_SERVICE_LIMIT = new Semaphore(10);
    *
-   * var userService = Parallel.create(propagators).withSharedLimit(USER_SERVICE_LIMIT);
-   * userService.map(ids, id -> fetchUser(id)); // at most 10 calls in flight across all callers
+   * var externalService = Parallel.create(propagators).withSharedLimit(EXTERNAL_SERVICE_LIMIT);
+   * externalService.map(ids, id -> fetch(id)); // at most 10 calls in flight across all callers
    * }</pre>
    *
    * <p>The limit applies to {@link #async}, {@link #map}, {@link #asMap}, {@link #toEither} and
