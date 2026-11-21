@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -106,9 +107,9 @@ public final class Parallel {
    * <p>Each task waits for its permit on its own virtual thread, so {@link #async} still returns
    * immediately. Waiting is interruptible: a task cancelled while waiting never runs. With {@link
    * #withTimeout(Duration)}, the timeout starts once the task holds its permit. The permit is
-   * released when the task's worker exits, so a timed-out task that is still running keeps it. The
-   * timeout does not bound the wait for a permit: if every permit is held by tasks that ignore
-   * interruption, waiting callers block until one of those tasks exits.
+   * released when the task returns, so a timed-out task that is still running keeps it. The timeout
+   * does not bound the wait for a permit: if every permit is held by tasks that ignore
+   * interruption, waiting callers block until one of those tasks returns.
    *
    * <p>Do not wait from inside a task for other tasks that use the same semaphore, for example by
    * calling {@link #map} or {@code async(...).get()}. If every permit is held by a task waiting in
@@ -355,28 +356,12 @@ public final class Parallel {
         Thread.ofVirtual()
             .unstarted(
                 () -> {
-                  var holdsPermit = false;
                   try {
-                    if (sharedLimit != null) {
-                      // Interruptible, so cancelling a waiting task stops it before it runs.
-                      sharedLimit.acquire();
-                      holdsPermit = true;
-                      // cancel() interrupts before it cancels the result, so check both.
-                      if (result.isDone() || Thread.currentThread().isInterrupted()) {
-                        result.completeExceptionally(new InterruptedException());
-                        return; // cancelled while waiting for the permit
-                      }
-                      startTimeout(result);
-                    }
-                    final var value = callable.call();
+                    final var value = callWithPermit(callable, result);
                     result.complete(value);
                   } catch (Throwable failure) {
                     result.completeExceptionally(failure);
                   } finally {
-                    // Release on worker exit: a timed-out task may still be running.
-                    if (holdsPermit) {
-                      sharedLimit.release();
-                    }
                     onWorkerExit.run();
                   }
                 });
@@ -398,6 +383,26 @@ public final class Parallel {
       startTimeout(result);
     }
     return new VirtualTask<>(worker, result, latch);
+  }
+
+  // Without a shared limit, just calls the task. With one, holds a permit while the task runs. A
+  // timed-out task keeps its permit until it returns.
+  private <T> T callWithPermit(Callable<T> callable, CompletableFuture<T> result) throws Exception {
+    if (sharedLimit == null) {
+      return callable.call();
+    }
+    // Interruptible, so cancelling a waiting task stops it before it runs.
+    sharedLimit.acquire();
+    try {
+      // cancel() interrupts before it cancels the result, so check both.
+      if (result.isDone() || Thread.currentThread().isInterrupted()) {
+        throw new InterruptedException("Cancelled while waiting for a permit");
+      }
+      startTimeout(result);
+      return callable.call();
+    } finally {
+      sharedLimit.release();
+    }
   }
 
   private void startTimeout(CompletableFuture<?> result) {
