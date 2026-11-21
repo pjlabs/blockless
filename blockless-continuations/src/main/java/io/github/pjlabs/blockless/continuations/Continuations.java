@@ -9,6 +9,7 @@ import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicInteger;
 import jdk.internal.vm.Continuation;
 import jdk.internal.vm.ContinuationScope;
@@ -39,6 +40,15 @@ public final class Continuations {
     } finally {
       DRAINS.remove();
     }
+  }
+
+  /**
+   * Starts a virtual-thread supplier using the shared common pool for dispatch and completion.
+   * Context propagators are optional. See {@link #supplier(Executor, Callable,
+   * ContextPropagator...)} for result-read and failure behavior.
+   */
+  public static <T> AsyncSupplier<T> supplier(Callable<T> task, ContextPropagator... propagators) {
+    return supplier(ForkJoinPool.commonPool(), task, propagators);
   }
 
   /**

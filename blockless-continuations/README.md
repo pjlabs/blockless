@@ -2,7 +2,7 @@
 
 `Continuations.supplier` runs its callable on a virtual thread, so ordinary
 blocking calls can use virtual-thread parking. A native continuation releases
-the supplied executor's worker until the body finishes. Pending result reads on ordinary
+the dispatch executor's worker until the body finishes. Pending result reads on ordinary
 platform threads throw `IllegalStateException` instead of waiting.
 Uses an internal OpenJDK API. No third-party runtime dependencies, annotations,
 or agent.
@@ -18,7 +18,7 @@ On the module path, replace `ALL-UNNAMED` with `blockless.continuations`.
 Missing exports fail before the task runs.
 
 ```java
-var user = Continuations.supplier(platformExecutor, () -> {
+var user = Continuations.supplier(() -> {
     var details = loadDetails(id);
     var permissions = loadPermissions(id);
     return buildUser(details, permissions);
@@ -38,14 +38,18 @@ completed outcomes; pending reads throw to prevent executor starvation.
 Tasks without a value can return `null`.
 An optional `onComplete` callback runs once the outcome is readable, including on failure.
 
-Use an application-owned executor that queues work and throws when rejecting it.
-It must not silently discard accepted tasks, including during shutdown.
+The default uses `ForkJoinPool.commonPool()` for dispatch and completion; the body
+always runs on a virtual thread. Java does not expose a general current executor.
+Use `Continuations.supplier(executor, task)` to choose one explicitly. A custom
+executor must throw on rejection and must not silently discard accepted tasks,
+including during shutdown.
 Submitting returns immediately. Suspension preserves
 the native waiter's stack. Completion resumes that waiter on the executor to
 publish the outcome. The user's body remains on its own virtual thread throughout.
 Task failures are thrown at `get()`.
 
-- Context propagators capture at submission and attach for the body's lifetime.
+- Context propagators are optional trailing arguments to either overload. They
+  capture at submission and attach for the body's lifetime.
   Changes, including clearing context, survive blocking calls. Executor workers
   have their previous context restored afterward.
 - Standard virtual-thread limitations apply, including monitor pinning on Java 21

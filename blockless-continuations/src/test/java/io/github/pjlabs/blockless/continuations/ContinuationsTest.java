@@ -31,105 +31,94 @@ import org.junit.jupiter.params.provider.ValueSource;
 @Timeout(15)
 class ContinuationsTest {
   @Test
-  void inlineCompletionCallbacksDoNotRecursivelyDrainOtherRunners() throws Exception {
-    final var release = new CountDownLatch(1);
-    final var commands = new ArrayList<LinkedBlockingQueue<Runnable>>();
-    final var results = new ArrayList<AsyncSupplier<Integer>>();
-    final var depth = new AtomicInteger();
-    final var maximumDepth = new AtomicInteger();
-    final var callbacks = new AtomicInteger();
-    try {
-      for (int i = 0; i < 64; i++) {
-        final var value = i;
-        final var queue = new LinkedBlockingQueue<Runnable>();
-        commands.add(queue);
-        results.add(
-            Continuations.supplier(
-                queue::add,
-                () -> {
-                  release.await();
-                  return value;
-                }));
-        final var start = queue.poll(5, TimeUnit.SECONDS);
-        assertNotNull(start);
-        start.run();
-      }
-      release.countDown();
-      final var resumes = new ArrayList<Runnable>();
-      for (final var queue : commands) {
-        final var resume = queue.poll(5, TimeUnit.SECONDS);
-        assertNotNull(resume);
-        resumes.add(resume);
-      }
-      for (int i = 0; i < results.size(); i++) {
-        final var next = i + 1;
-        results
-            .get(i)
-            .onComplete(
-                () -> {
-                  maximumDepth.accumulateAndGet(depth.incrementAndGet(), Math::max);
-                  try {
-                    callbacks.incrementAndGet();
-                    if (next < resumes.size()) resumes.get(next).run();
-                  } finally {
-                    depth.decrementAndGet();
-                  }
-                });
-      }
-      resumes.getFirst().run();
-      assertEquals(results.size(), callbacks.get());
-      for (int i = 0; i < results.size(); i++) assertEquals(i, results.get(i).get());
-      assertEquals(1, maximumDepth.get());
-      // The thread-local dispatch queue must not retain later work after draining.
-      assertEquals(42, await(Continuations.supplier(Runnable::run, () -> 42)));
-    } finally {
-      release.countDown();
-    }
+  void blockingCodeNeedsOnlyOneSupplier() throws Exception {
+    final var greeting =
+        Continuations.supplier(
+            () -> {
+              assertTrue(Thread.currentThread().isVirtual());
+              Thread.sleep(10);
+              return "hello";
+            });
+
+    assertEquals("hello", awaitResult(greeting));
+    assertEquals("hello", greeting.get());
   }
 
   @Test
-  void nestedSuppliersStartInParallelFromAVirtualCallerWithADirectExecutor() throws Exception {
-    final var started = new CountDownLatch(2);
-    final var release = new CountDownLatch(1);
-    final Callable<Integer> body =
-        () -> {
-          started.countDown();
-          release.await();
-          return 1;
-        };
-    try (final var callers = Executors.newVirtualThreadPerTaskExecutor()) {
-      final var caller =
-          callers.submit(
+  void independentSuppliersStartInParallelBeforeTheirResultsAreRead() throws Exception {
+    final var bothStarted = new CountDownLatch(2);
+    final var finishQueries = new CountDownLatch(1);
+    try (final var executor = Executors.newSingleThreadExecutor()) {
+      final var user =
+          Continuations.supplier(
+              executor,
               () -> {
-                final var first = Continuations.supplier(Runnable::run, body);
-                final var second = Continuations.supplier(Runnable::run, body);
-                return first.get() + second.get();
+                final var details =
+                    Continuations.supplier(
+                        executor,
+                        () -> {
+                          bothStarted.countDown();
+                          finishQueries.await();
+                          return "Alice";
+                        });
+                final var permissions =
+                    Continuations.supplier(
+                        executor,
+                        () -> {
+                          bothStarted.countDown();
+                          finishQueries.await();
+                          return "admin";
+                        });
+                return details.get() + ": " + permissions.get();
               });
-      try {
-        assertTrue(
-            started.await(5, TimeUnit.SECONDS), "both bodies must start before either finishes");
-        release.countDown();
-        assertEquals(2, caller.get(5, TimeUnit.SECONDS));
-      } finally {
-        release.countDown();
-        caller.cancel(true);
-      }
+
+      assertTrue(
+          bothStarted.await(5, TimeUnit.SECONDS), "both queries start before either finishes");
+      // Even with only one platform worker, unrelated work can run while the queries wait.
+      executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
+      assertFalse(user.isDone());
+      finishQueries.countDown();
+      assertEquals("Alice: admin", awaitResult(user));
+    } finally {
+      finishQueries.countDown();
     }
   }
 
   @Test
-  void pendingReadCannotDeadlockTheOnlyWorkerNeededToRunTheTask() throws Exception {
+  void dependentSuppliersPropagateTheOriginalFailure() throws Exception {
+    final var stage = new CompletableFuture<String>();
+    final var failure = new IllegalStateException("resumed task failed");
+    try (final var executor = Executors.newSingleThreadExecutor()) {
+      final var value =
+          Continuations.supplier(
+              executor,
+              () -> {
+                stage.get();
+                throw failure;
+              });
+      final var completion = Continuations.supplier(executor, value::get);
+      executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
+      stage.complete("ready");
+      assertSame(failure, assertThrows(IllegalStateException.class, () -> awaitResult(completion)));
+    } finally {
+      stage.complete("release waiter");
+    }
+  }
+
+  @Test
+  void pendingResultReadsFailFastOnPlatformThreads() throws Exception {
     try (final var executor = Executors.newSingleThreadExecutor()) {
       final var caller =
           executor.submit(
               () -> {
+                // This worker must return before its queued supplier can start.
                 final var result = Continuations.supplier(executor, () -> 42);
                 assertThrows(IllegalStateException.class, result::get);
                 return result;
               });
       try {
         final var result = caller.get(5, TimeUnit.SECONDS);
-        assertEquals(42, await(result));
+        assertEquals(42, awaitResult(result));
         assertEquals(42, result.get());
       } finally {
         caller.cancel(true);
@@ -138,37 +127,41 @@ class ContinuationsTest {
   }
 
   @Test
-  void suppliersStartEagerlyAndReturnValuesAcrossSuspendedCallers() throws Exception {
-    final var stage = new CompletableFuture<String>();
-    final var entries = new AtomicInteger();
+  void initialExecutorRejectionDoesNotStartTheBody() {
     try (final var executor = Executors.newSingleThreadExecutor()) {
-      final var value =
-          Continuations.supplier(
-              executor,
-              () -> {
-                entries.incrementAndGet();
-                return "saved:" + stage.get();
-              });
-      final var combined = Continuations.supplier(executor, () -> "[" + value.get() + "]");
-      executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
-      assertEquals(1, entries.get());
-      final var completion = Continuations.supplier(executor, combined::get);
-      // The only platform worker remains available while both suppliers and their caller suspend.
-      executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
-      assertFalse(completion.isDone());
-      stage.complete("ready");
-      assertEquals("[saved:ready]", await(completion));
-      assertEquals("saved:ready", value.get());
-      assertEquals(1, entries.get());
+      executor.shutdown();
+      final var result = Continuations.supplier(executor, () -> fail("body must not start"));
+      assertThrows(RejectedExecutionException.class, result::get);
+    }
+  }
+
+  @Test
+  void missingExportFailsBeforeExecutingTheTask() throws Exception {
+    final var java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+    final var process =
+        new ProcessBuilder(
+                java,
+                "-cp",
+                System.getProperty("java.class.path"),
+                ContinuationsTest.class.getName())
+            .redirectErrorStream(true)
+            .start();
+    try {
+      assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+      assertEquals(
+          0,
+          process.exitValue(),
+          new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
     } finally {
-      stage.complete("release waiter");
+      process.destroyForcibly();
     }
   }
 
   @ParameterizedTest
   @NullSource
   @ValueSource(strings = "changed inside flow")
-  void plainBlockingBodyPreservesContextAndReleasesBothWorkers(String changed) throws Exception {
+  void optionalContextSurvivesBlockingAndIsRestoredOnExecutorWorkers(String changed)
+      throws Exception {
     final var stage = new CompletableFuture<String>();
     final var entries = new AtomicInteger();
     final var cleanups = new AtomicInteger();
@@ -191,7 +184,7 @@ class ContinuationsTest {
                   assertEquals("request", context.get());
                   if (changed == null) context.remove();
                   else context.set(changed);
-                  final var result = nested(stage, 42L);
+                  final var result = stage.get();
                   assertEquals(changed, context.get());
                   assertSame(bodyThread, Thread.currentThread());
                   return result;
@@ -206,7 +199,7 @@ class ContinuationsTest {
       assertFalse(completion.isDone());
       assertEquals(0, cleanups.get());
       stage.complete("ready");
-      assertEquals("saved42ready", await(completion));
+      assertEquals("ready", awaitResult(completion));
       assertEquals("resume", completionThread.get(5, TimeUnit.SECONDS));
       assertEquals(1, entries.get());
       assertEquals(1, cleanups.get());
@@ -215,25 +208,6 @@ class ContinuationsTest {
     } finally {
       stage.complete("release waiter");
       context.remove();
-    }
-  }
-
-  @Test
-  void reportsTaskFailureAfterResumption() throws Exception {
-    final var stage = new CompletableFuture<String>();
-    final var failure = new IllegalStateException("resumed task failed");
-    try (final var executor = Executors.newSingleThreadExecutor()) {
-      final var value =
-          Continuations.supplier(
-              executor,
-              () -> {
-                stage.get();
-                throw failure;
-              });
-      final var completion = Continuations.supplier(executor, value::get);
-      executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
-      stage.complete("ready");
-      assertSame(failure, assertThrows(IllegalStateException.class, () -> await(completion)));
     }
   }
 
@@ -275,14 +249,11 @@ class ContinuationsTest {
       assertFalse(completion.isDone(), "cleanup must finish before the result is published");
       cleanup.complete(null);
       if (fails)
-        assertSame(failure, assertThrows(IllegalStateException.class, () -> await(completion)));
-      else assertEquals("ready", await(completion));
+        assertSame(
+            failure, assertThrows(IllegalStateException.class, () -> awaitResult(completion)));
+      else assertEquals("ready", awaitResult(completion));
       assertEquals(1, cleanups.get());
       assertEquals("request", context.get());
-
-      // An initial rejection must not start the task on the cleanup thread.
-      final var rejected = Continuations.supplier(executor, () -> fail("task must not start"));
-      assertThrows(RejectedExecutionException.class, rejected::get);
     } finally {
       stage.complete("release waiter");
       cleanup.complete(null);
@@ -291,24 +262,91 @@ class ContinuationsTest {
   }
 
   @Test
-  void missingExportFailsBeforeExecutingTheTask() throws Exception {
-    final var java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-    final var process =
-        new ProcessBuilder(
-                java,
-                "-cp",
-                System.getProperty("java.class.path"),
-                ContinuationsTest.class.getName())
-            .redirectErrorStream(true)
-            .start();
+  void nestedSuppliersStartInParallelFromAVirtualCallerWithADirectExecutor() throws Exception {
+    final var started = new CountDownLatch(2);
+    final var release = new CountDownLatch(1);
+    final Callable<Integer> body =
+        () -> {
+          started.countDown();
+          release.await();
+          return 1;
+        };
+    try (final var callers = Executors.newVirtualThreadPerTaskExecutor()) {
+      final var caller =
+          callers.submit(
+              () -> {
+                final var first = Continuations.supplier(Runnable::run, body);
+                final var second = Continuations.supplier(Runnable::run, body);
+                return first.get() + second.get();
+              });
+      try {
+        assertTrue(
+            started.await(5, TimeUnit.SECONDS), "both bodies must start before either finishes");
+        release.countDown();
+        assertEquals(2, caller.get(5, TimeUnit.SECONDS));
+      } finally {
+        release.countDown();
+        caller.cancel(true);
+      }
+    }
+  }
+
+  @Test
+  void inlineCompletionCallbacksDoNotRecursivelyDrainOtherRunners() throws Exception {
+    final var finishBodies = new CountDownLatch(1);
+    final var executorQueues = new ArrayList<LinkedBlockingQueue<Runnable>>();
+    final var suppliers = new ArrayList<AsyncSupplier<Integer>>();
+    final var callbackDepth = new AtomicInteger();
+    final var maximumCallbackDepth = new AtomicInteger();
+    final var completedCallbacks = new AtomicInteger();
     try {
-      assertTrue(process.waitFor(10, TimeUnit.SECONDS));
-      assertEquals(
-          0,
-          process.exitValue(),
-          new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
+      // Start every body, but hold its completion task in a separate executor queue.
+      for (int i = 0; i < 64; i++) {
+        final var value = i;
+        final var queue = new LinkedBlockingQueue<Runnable>();
+        executorQueues.add(queue);
+        suppliers.add(
+            Continuations.supplier(
+                queue::add,
+                () -> {
+                  finishBodies.await();
+                  return value;
+                }));
+        final var start = queue.poll(5, TimeUnit.SECONDS);
+        assertNotNull(start);
+        start.run();
+      }
+      finishBodies.countDown();
+      final var completionTasks = new ArrayList<Runnable>();
+      for (final var queue : executorQueues) {
+        final var resume = queue.poll(5, TimeUnit.SECONDS);
+        assertNotNull(resume);
+        completionTasks.add(resume);
+      }
+      // Each callback runs the next supplier's completion inline on this same thread.
+      for (int i = 0; i < suppliers.size(); i++) {
+        final var next = i + 1;
+        suppliers
+            .get(i)
+            .onComplete(
+                () -> {
+                  maximumCallbackDepth.accumulateAndGet(callbackDepth.incrementAndGet(), Math::max);
+                  try {
+                    completedCallbacks.incrementAndGet();
+                    if (next < completionTasks.size()) completionTasks.get(next).run();
+                  } finally {
+                    callbackDepth.decrementAndGet();
+                  }
+                });
+      }
+      completionTasks.getFirst().run();
+      assertEquals(suppliers.size(), completedCallbacks.get());
+      for (int i = 0; i < suppliers.size(); i++) assertEquals(i, suppliers.get(i).get());
+      assertEquals(1, maximumCallbackDepth.get());
+      // The thread-local dispatch queue must not retain later work after draining.
+      assertEquals(42, awaitResult(Continuations.supplier(Runnable::run, () -> 42)));
     } finally {
-      process.destroyForcibly();
+      finishBodies.countDown();
     }
   }
 
@@ -317,17 +355,13 @@ class ContinuationsTest {
     final var failure =
         assertThrows(
             IllegalStateException.class,
-            () -> Continuations.supplier(Runnable::run, () -> fail("task must not run")));
+            () -> Continuations.supplier(() -> fail("task must not run")));
     assertTrue(
         failure.getMessage().contains("--add-exports=java.base/jdk.internal.vm=ALL-UNNAMED"));
   }
 
-  private static String nested(CompletableFuture<String> stage, long number) throws Exception {
-    final var prefix = "saved" + number;
-    return prefix + stage.get();
-  }
-
-  private static <T> T await(AsyncSupplier<T> supplier) throws Exception {
+  // The JUnit thread waits for readiness here; application code can call get() on a virtual thread.
+  private static <T> T awaitResult(AsyncSupplier<T> supplier) throws Exception {
     final var ready = new CompletableFuture<Void>();
     supplier.onComplete(() -> ready.complete(null));
     ready.get(5, TimeUnit.SECONDS);
