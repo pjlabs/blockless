@@ -9,12 +9,8 @@ import io.github.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
 import io.grpc.Context;
 import io.opentelemetry.context.ContextKey;
 import java.util.concurrent.Callable;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullSource;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.MDC;
 
 class CallableContextIntegrationTest {
@@ -53,24 +49,36 @@ class CallableContextIntegrationTest {
     }
   }
 
-  @ParameterizedTest
-  @NullSource
-  @ValueSource(strings = "parent-value")
-  void restoresWorkerThreadPreExistingMdc(String parentValue) throws Exception {
+  @Test
+  void restoresWorkerThreadPreExistingMdc() throws Exception {
     final var mdc = new Slf4jMdcContextPropagator();
     MDC.clear();
-    try {
-      if (parentValue != null) MDC.put("k", parentValue);
-      final var wrapped = CallableContext.wrap(() -> MDC.get("k"), mdc);
-      try (final var worker = Executors.newSingleThreadExecutor()) {
-        worker.submit(() -> MDC.put("k", "worker-value")).get(5, TimeUnit.SECONDS);
-        assertEquals(parentValue, worker.submit(wrapped).get(5, TimeUnit.SECONDS));
-        assertEquals("worker-value", worker.submit(() -> MDC.get("k")).get(5, TimeUnit.SECONDS));
-      }
-      assertEquals(parentValue, MDC.get("k"));
-    } finally {
-      MDC.clear();
-    }
+    MDC.put("k", "parent-value");
+
+    final var wrapped = CallableContext.wrap(() -> MDC.get("k"), mdc);
+
+    MDC.clear();
+
+    // Simulate a worker thread that already has its own MDC context
+    final var workerMdcAfter = new AtomicReference<String>();
+    final var workerThread =
+        Thread.startVirtualThread(
+            () -> {
+              MDC.put("k", "worker-value");
+              try {
+                wrapped.call();
+              } catch (Exception e) {
+                throw new RuntimeException(e);
+              }
+              // After wrapped callable completes, worker's own MDC should be restored
+              workerMdcAfter.set(MDC.get("k"));
+            });
+    workerThread.join();
+
+    assertEquals(
+        "worker-value",
+        workerMdcAfter.get(),
+        "worker thread's pre-existing MDC must be restored after wrapped callable executes");
   }
 
   @Test

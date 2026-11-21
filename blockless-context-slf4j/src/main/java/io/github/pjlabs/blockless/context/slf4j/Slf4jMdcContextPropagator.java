@@ -14,12 +14,7 @@ public final class Slf4jMdcContextPropagator implements ContextPropagator {
 
   @Override
   public Object attach(Object captured) {
-    if (captured == null) {
-      final var previous = MDC.getCopyOfContextMap();
-      MDC.clear();
-      return previous;
-    }
-    if (!(captured instanceof Map<?, ?> raw)) {
+    if (captured == null || !(captured instanceof Map<?, ?> raw)) {
       return null;
     }
     @SuppressWarnings("unchecked")
