@@ -19,11 +19,15 @@ Missing exports fail before the task runs.
 
 ```java
 var user = Continuations.supplier(platformExecutor, () -> {
-    var details = Continuations.supplier(platformExecutor, () -> loadDetails(id));
-    var permissions = Continuations.supplier(platformExecutor, () -> loadPermissions(id));
-    return buildUser(details.get(), permissions.get());
+    var details = loadDetails(id);
+    var permissions = loadPermissions(id);
+    return buildUser(details, permissions);
 });
 ```
+
+One supplier is enough for ordinary blocking code. These calls run sequentially
+on the body's virtual thread. Start additional suppliers before reading their
+results when independent operations should run in parallel.
 
 `supplier` starts eagerly and returns an `AsyncSupplier<T>` (a `Supplier<T>`)
 with a cached value or failure. The callable supports checked exceptions and
