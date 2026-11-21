@@ -26,6 +26,36 @@ import org.junit.jupiter.api.Timeout;
 @Timeout(15)
 class ContinuationsTest {
   @Test
+  void suppliersStartEagerlyAndReturnValuesAcrossSuspendedCallers() throws Exception {
+    final var stage = new CompletableFuture<String>();
+    final var entries = new AtomicInteger();
+    final var result = new AtomicReference<String>();
+    try (final var executor = Executors.newSingleThreadExecutor()) {
+      final var value =
+          Continuations.supplier(
+              executor,
+              () -> {
+                entries.incrementAndGet();
+                return "saved:" + Blockless.get(stage);
+              });
+      final var combined = Continuations.supplier(executor, () -> "[" + value.get() + "]");
+      executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
+      assertEquals(1, entries.get());
+      final var completion = Continuations.run(executor, () -> result.set(combined.get()));
+      // The only platform worker remains available while both suppliers and their caller suspend.
+      executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
+      assertFalse(completion.toCompletableFuture().isDone());
+      stage.complete("ready");
+      completion.toCompletableFuture().get(5, TimeUnit.SECONDS);
+      assertEquals("[saved:ready]", result.get());
+      assertEquals("saved:ready", value.get());
+      assertEquals(1, entries.get());
+    } finally {
+      stage.complete("release waiter");
+    }
+  }
+
+  @Test
   void suspendsNestedFramesAndRestoresContextOnAnotherWorker() throws Exception {
     final var stage = new CompletableFuture<String>();
     final var result = new AtomicReference<String>();
@@ -76,13 +106,14 @@ class ContinuationsTest {
     final var stage = new CompletableFuture<String>();
     final var failure = new IllegalStateException("resumed task failed");
     try (final var executor = Executors.newSingleThreadExecutor()) {
-      final var completion =
-          Continuations.run(
+      final var value =
+          Continuations.supplier(
               executor,
               () -> {
                 Blockless.get(stage);
                 throw failure;
               });
+      final var completion = Continuations.run(executor, value::get);
       executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
       stage.complete("ready");
       assertSame(

@@ -2,7 +2,8 @@
 
 Runs synchronous-looking code on a platform executor and releases its worker
 while a Blockless supplier is pending. This requires an explicit
-`Continuations.run` boundary; ordinary supplier reads outside it still wait.
+`Continuations.run` or `Continuations.supplier` boundary; ordinary platform-thread
+supplier reads outside it still wait.
 Uses an internal OpenJDK API. No third-party runtime dependencies, annotations,
 or agent.
 
@@ -17,11 +18,19 @@ On the module path, replace `ALL-UNNAMED` with `blockless.continuations`.
 Missing exports fail before the task runs.
 
 ```java
-var completion = Continuations.run(platformExecutor, () -> {
-    var user = Blockless.supplier(() -> loadUser(id)).get();
-    process(user);
+var user = Continuations.supplier(platformExecutor, () -> {
+    var details = Blockless.supplier(() -> loadDetails(id));
+    var permissions = Blockless.supplier(() -> loadPermissions(id));
+    return buildUser(details.get(), permissions.get());
 });
+
+var completion = Continuations.run(platformExecutor, () -> process(user.get()));
 ```
+
+`supplier` starts eagerly and returns a `Supplier<T>` with a cached value or
+failure. Its pending `get()` suspends callers inside another continuation, parks
+virtual-thread callers, and waits on ordinary platform-thread callers outside a
+continuation. `run` remains available for tasks without a return value.
 
 Use an application-owned executor that queues work. The caller returns
 immediately; do not join `completion` on it. Pending reads suspend the stack
@@ -31,7 +40,7 @@ complete the returned stage exceptionally.
 
 - Supports `Blockless.get`, `Blockless.supplier(...).get()`, and `Parallel.async(...).get()`.
   Direct I/O and other blocking calls in the task body still block.
-- Optional context propagators passed to `run` attach the submission snapshot
+- Optional context propagators passed to either method attach the submission snapshot
   on each resume and restore the executor thread afterward.
 - Do not hold monitors, native frames, locks, or thread-affine resources across
   suspension. JVM pinning can prevent yielding.

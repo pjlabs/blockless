@@ -1,6 +1,7 @@
 package io.github.pjlabs.blockless.continuations;
 
 import io.github.pjlabs.blockless.AsyncSupplier;
+import io.github.pjlabs.blockless.Blockless;
 import io.github.pjlabs.blockless.CallableContext;
 import io.github.pjlabs.blockless.ContextPropagator;
 import io.github.pjlabs.blockless.SupplierWaitSupport;
@@ -9,6 +10,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import jdk.internal.vm.Continuation;
 import jdk.internal.vm.ContinuationScope;
 
@@ -27,6 +29,30 @@ public final class Continuations {
    */
   public static CompletionStage<Void> run(
       Executor executor, Runnable task, ContextPropagator... propagators) {
+    Objects.requireNonNull(task, "task");
+    return Continuations.<Void>start(
+            executor,
+            () -> {
+              task.run();
+              return null;
+            },
+            propagators)
+        .minimalCompletionStage();
+  }
+
+  /**
+   * Starts a value-producing continuation immediately and returns a supplier of its cached outcome.
+   * Pending reads inside another continuation suspend that caller; virtual-thread reads park, and
+   * ordinary platform-thread reads outside a continuation wait. Task failures are thrown at get().
+   * Execution and context propagation follow the same rules as {@link #run}.
+   */
+  public static <T> Supplier<T> supplier(
+      Executor executor, Supplier<T> task, ContextPropagator... propagators) {
+    return Blockless.supplier(start(executor, task, propagators));
+  }
+
+  private static <T> CompletableFuture<T> start(
+      Executor executor, Supplier<T> task, ContextPropagator[] propagators) {
     Objects.requireNonNull(executor, "executor");
     Objects.requireNonNull(task, "task");
     final var apiModule = Continuations.class.getModule();
@@ -36,25 +62,26 @@ public final class Continuations {
           "Experimental native continuations require --add-exports=java.base/jdk.internal.vm="
               + target);
     }
-    final var runner = new Runner(executor, task, propagators);
+    final var runner = new Runner<T>(executor, task, propagators);
     runner.signal();
-    return runner.completion.minimalCompletionStage();
+    return runner.completion;
   }
 
-  private static final class Runner {
+  private static final class Runner<T> {
     // Initialize native types only after run() has checked the required JVM export.
     private static final ContinuationScope SCOPE = new ContinuationScope("blockless");
     private final Executor executor;
-    private final CompletableFuture<Void> completion = new CompletableFuture<>();
+    private final CompletableFuture<T> completion = new CompletableFuture<>();
     private final AtomicInteger signals = new AtomicInteger();
     private final Runnable drain;
     // Confined to the serialized drain; a suspended continuation is resumed exactly once.
     private final Continuation continuation;
     private AsyncSupplier<?> pending;
+    private T value;
 
-    private Runner(Executor executor, Runnable task, ContextPropagator[] propagators) {
+    private Runner(Executor executor, Supplier<T> task, ContextPropagator[] propagators) {
       this.executor = executor;
-      continuation = new Continuation(SCOPE, task);
+      continuation = new Continuation(SCOPE, () -> value = task.get());
       final var captured =
           CallableContext.wrap(
               () -> SupplierWaitSupport.withHandler(this::suspend, this::advance), propagators);
@@ -62,7 +89,7 @@ public final class Continuations {
           () -> {
             try {
               if (captured.call()) {
-                completion.complete(null);
+                completion.complete(value);
               }
             } catch (Throwable failure) {
               completion.completeExceptionally(failure);
