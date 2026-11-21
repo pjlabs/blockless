@@ -11,14 +11,15 @@ A tiny Java 21 library for virtual thread concurrency. Two things:
 1. **`Blockless.get()`** — wait for async results safely, without entering the future's internals
 2. **`Parallel`** — fan out work on virtual threads, collect results, keep your trace context
 
-So your platform threads stay free and your context tags along for the ride.
+So you can wait on async results without calling their blocking methods, and your context tags
+along for the ride.
 
 Zero dependencies in core. Pluggable context propagation for MDC, gRPC, and OpenTelemetry.
 
 ## Quick start
 
 ```java
-// Wait for a CompletionStage without blocking platform threads
+// Wait for a CompletionStage without calling its blocking methods
 var result = Blockless.get(CompletableFuture.supplyAsync(() -> "hello"));
 
 // Run a Callable on a virtual thread and get the result
@@ -31,19 +32,18 @@ var answer = Blockless.get(() -> expensiveComputation());
 If that implementation uses `synchronized` or you're on a platform thread, you
 could block or pin.
 
-`Blockless.get()` never enters the `CompletionStage` internals. It waits on a
-virtual thread via a `CountDownLatch` — your thread is never at risk, regardless
-of what the stage does internally.
+`Blockless.get()` registers a completion callback and waits on a `CountDownLatch`
+through a shared `OutcomeSupplier`. It does not call the future's blocking methods
+or create an extra waiting thread. Virtual-thread callers park on the latch;
+platform-thread callers block until the outcome is available.
 
 ```java
-// Parks inside CompletableFuture internals — you're at the mercy of the implementation.
+// Wait inside CompletableFuture. May run other pending callbacks on the caller thread.
 String result = someFuture.join();
 
-// Waits on a virtual thread + latch. Your thread never touches the future. 🐉
+// Wait on a latch released by a completion callback. The wait itself runs no callbacks.
 String result = Blockless.get(someFuture);
 ```
-
-**Defensive coding:** `Blockless.get()` is safe whether your calling thread is a virtual thread or a platform thread. If a refactor, config change, or library upgrade silently changes what thread your code runs on, `.join()` could start blocking platform threads with no warning. `Blockless.get()` stays safe regardless — you don't have to know or care what thread you're on.
 
 Also works with callables — runs them on a virtual thread and blocks for the result:
 
