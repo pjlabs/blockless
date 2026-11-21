@@ -14,6 +14,7 @@ Published to Maven Central: `io.github.pjlabs:blockless`
 - `blockless-context-grpc` — gRPC Context propagation
 - `blockless-context-opentelemetry` — OpenTelemetry Context propagation
 - `blockless-tests` — Integration tests
+- `blockless-continuations` — Experimental native continuations; setup in `blockless-continuations/README.md`.
 
 ## Build & Test
 
