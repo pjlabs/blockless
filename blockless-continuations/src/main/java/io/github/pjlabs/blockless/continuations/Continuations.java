@@ -4,6 +4,7 @@ import io.github.pjlabs.blockless.AsyncSupplier;
 import io.github.pjlabs.blockless.Blockless;
 import io.github.pjlabs.blockless.CallableContext;
 import io.github.pjlabs.blockless.ContextPropagator;
+import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
@@ -18,7 +19,27 @@ import jdk.internal.vm.ContinuationScope;
  * classpath).
  */
 public final class Continuations {
+  private static final ThreadLocal<ArrayDeque<Runnable>> DRAINS = new ThreadLocal<>();
+
   private Continuations() {}
+
+  private static void runDrains(Runnable task) {
+    final var active = DRAINS.get();
+    if (active != null) {
+      active.addLast(task);
+      return;
+    }
+    final var queue = new ArrayDeque<Runnable>();
+    DRAINS.set(queue);
+    try {
+      queue.addLast(task);
+      for (var next = queue.pollFirst(); next != null; next = queue.pollFirst()) {
+        next.run();
+      }
+    } finally {
+      DRAINS.remove();
+    }
+  }
 
   /**
    * Dispatches work onto a virtual thread and returns a supplier of its cached outcome. A native
@@ -115,7 +136,7 @@ public final class Continuations {
         return;
       }
       try {
-        executor.execute(drain);
+        executor.execute(() -> runDrains(drain));
       } catch (Throwable failure) {
         if (pending == null) {
           // Initial submission failed: the task has not acquired any resources yet.
@@ -123,7 +144,7 @@ public final class Continuations {
         } else {
           // The body and its finally blocks have already finished. Publish its actual outcome,
           // even if its executor has closed; never restart work or replace a successful result.
-          Thread.ofVirtual().inheritInheritableThreadLocals(false).start(drain);
+          Thread.ofVirtual().inheritInheritableThreadLocals(false).start(() -> runDrains(drain));
         }
       }
     }

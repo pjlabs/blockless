@@ -2,6 +2,7 @@ package io.github.pjlabs.blockless.continuations;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -11,10 +12,12 @@ import io.github.pjlabs.blockless.AsyncSupplier;
 import io.github.pjlabs.blockless.ContextPropagator;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -27,6 +30,63 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 @Timeout(15)
 class ContinuationsTest {
+  @Test
+  void inlineCompletionCallbacksDoNotRecursivelyDrainOtherRunners() throws Exception {
+    final var release = new CountDownLatch(1);
+    final var commands = new ArrayList<LinkedBlockingQueue<Runnable>>();
+    final var results = new ArrayList<AsyncSupplier<Integer>>();
+    final var depth = new AtomicInteger();
+    final var maximumDepth = new AtomicInteger();
+    final var callbacks = new AtomicInteger();
+    try {
+      for (int i = 0; i < 64; i++) {
+        final var value = i;
+        final var queue = new LinkedBlockingQueue<Runnable>();
+        commands.add(queue);
+        results.add(
+            Continuations.supplier(
+                queue::add,
+                () -> {
+                  release.await();
+                  return value;
+                }));
+        final var start = queue.poll(5, TimeUnit.SECONDS);
+        assertNotNull(start);
+        start.run();
+      }
+      release.countDown();
+      final var resumes = new ArrayList<Runnable>();
+      for (final var queue : commands) {
+        final var resume = queue.poll(5, TimeUnit.SECONDS);
+        assertNotNull(resume);
+        resumes.add(resume);
+      }
+      for (int i = 0; i < results.size(); i++) {
+        final var next = i + 1;
+        results
+            .get(i)
+            .onComplete(
+                () -> {
+                  maximumDepth.accumulateAndGet(depth.incrementAndGet(), Math::max);
+                  try {
+                    callbacks.incrementAndGet();
+                    if (next < resumes.size()) resumes.get(next).run();
+                  } finally {
+                    depth.decrementAndGet();
+                  }
+                });
+      }
+      resumes.getFirst().run();
+      assertEquals(results.size(), callbacks.get());
+      for (int i = 0; i < results.size(); i++) assertEquals(i, results.get(i).get());
+      assertEquals(1, maximumDepth.get());
+      // The thread-local dispatch queue must not retain later work after draining.
+      assertEquals(42, await(Continuations.supplier(Runnable::run, () -> 42)));
+    } finally {
+      release.countDown();
+    }
+  }
+
   @Test
   void nestedSuppliersStartInParallelFromAVirtualCallerWithADirectExecutor() throws Exception {
     final var started = new CountDownLatch(2);
