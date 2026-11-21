@@ -94,9 +94,14 @@ Supplier<String> data = parallel.async(() -> fetchData());
 // Build a map in parallel
 Map<String, Profile> profiles = parallel.asMap(userIds, id -> loadProfile(id));
 
-// Limit concurrent tasks (extras park until a permit frees up)
+// Limit each call to 10 concurrent tasks (the rest wait for a free slot)
 var boundedParallel = parallel.withMaxConcurrency(10);
 List<String> names = boundedParallel.map(userIds, id -> fetchName(id));
+
+// Cap calls to one external service across ALL requests: share one Semaphore,
+// held in a field, e.g. static final Semaphore EXTERNAL_SERVICE_LIMIT = new Semaphore(10);
+var externalService = parallel.withSharedLimit(EXTERNAL_SERVICE_LIMIT);
+List<String> names = externalService.map(userIds, id -> fetchName(id));
 
 // Per-task timeout — result fails and worker is interrupted at the deadline
 var timedParallel = parallel.withTimeout(Duration.ofSeconds(5));
@@ -109,8 +114,16 @@ var safeParallel = parallel.withMaxConcurrency(10).withTimeout(Duration.ofSecond
 List<Either<String, Throwable>> results = parallel.toEither(ids, id -> riskyFetch(id));
 ```
 
-Timeouts apply to each task after it is launched. Time queued for a concurrency slot does not count,
-and the task timeout is not a deadline for the batch. `map()` throws a wrapped `TimeoutException`,
+`withMaxConcurrency` limits each call separately: two simultaneous requests can run 2 × N tasks.
+`withSharedLimit` limits every call, thread and `Parallel` instance that uses the same `Semaphore`,
+including `async()`. Use it to protect an external service, and keep the semaphore in a field so it
+is shared. Combine both for large batches. Don't wait for tasks that use the same semaphore from
+inside one of its tasks: if every permit is held by a waiting task, they deadlock.
+
+Timeouts apply to each task after it is launched. Time queued for a concurrency slot or a shared-limit
+permit does not count, and the task timeout is not a deadline for the batch. It also does not bound
+the wait for a permit: if every permit is held by tasks that ignore interruption, callers block until
+one of them exits. `map()` throws a wrapped `TimeoutException`,
 while `toEither()` collects it as `Either.fail()` and continues processing the other items.
 
 On failure, `map()` interrupts the other active workers without waiting for their cleanup. A task

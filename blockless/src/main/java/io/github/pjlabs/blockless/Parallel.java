@@ -13,6 +13,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BiConsumer;
@@ -28,7 +29,9 @@ import java.util.function.Supplier;
  *
  * <p>When {@link #withMaxConcurrency(int)} is set, {@link #map} and {@link #toEither} use a sliding
  * window — at most N calculations are active per batch. Tasks are collected in completion order to
- * avoid head-of-line blocking, but results are always returned in input order.
+ * avoid head-of-line blocking, but results are always returned in input order. Each call gets its
+ * own window. To cap concurrency across calls, threads and instances, for example requests to one
+ * external service, use {@link #withSharedLimit(Semaphore)}.
  *
  * <p>Callers own the resources used by submitted calculations and are responsible for their
  * cleanup. Submitted code must handle interruption and resources being closed after a batch returns
@@ -45,11 +48,17 @@ public final class Parallel {
   private final List<ContextPropagator> propagators;
   private final int maxConcurrency;
   private final Duration timeout;
+  private final Semaphore sharedLimit;
 
-  private Parallel(List<ContextPropagator> propagators, int maxConcurrency, Duration timeout) {
+  private Parallel(
+      List<ContextPropagator> propagators,
+      int maxConcurrency,
+      Duration timeout,
+      Semaphore sharedLimit) {
     this.propagators = List.copyOf(propagators);
     this.maxConcurrency = maxConcurrency;
     this.timeout = timeout;
+    this.sharedLimit = sharedLimit;
   }
 
   /** Creates an unbounded {@link Parallel} instance with the given propagators. */
@@ -59,19 +68,55 @@ public final class Parallel {
 
   /** Creates an unbounded {@link Parallel} instance with the given propagators. */
   public static Parallel create(List<ContextPropagator> propagators) {
-    return new Parallel(propagators, 0, null);
+    return new Parallel(propagators, 0, null, null);
   }
 
   /**
    * Returns a new {@link Parallel} with the same propagators but limited to {@code maxConcurrency}
-   * concurrent tasks. In {@link #map} and {@link #toEither}, this controls the sliding window size
-   * — at most N calculations are active per batch.
+   * concurrent tasks per call. In {@link #map} and {@link #toEither}, this controls the sliding
+   * window size — at most N calculations are active per batch.
+   *
+   * <p>Every call gets its own window, so two concurrent calls can run up to 2 × N tasks. To cap
+   * the total across calls, threads and instances, use {@link #withSharedLimit(Semaphore)}.
    */
   public Parallel withMaxConcurrency(int maxConcurrency) {
     if (maxConcurrency < 1) {
       throw new IllegalArgumentException("maxConcurrency must be at least 1");
     }
-    return new Parallel(propagators, maxConcurrency, timeout);
+    return new Parallel(propagators, maxConcurrency, timeout, sharedLimit);
+  }
+
+  /**
+   * Returns a new {@link Parallel} whose tasks each run only while holding a permit from {@code
+   * limit}. Create one {@link Semaphore} per external service and keep it, for example in a field,
+   * so every call, thread and instance that uses it shares the same limit:
+   *
+   * <pre>{@code
+   * static final Semaphore EXTERNAL_SERVICE_LIMIT = new Semaphore(10);
+   *
+   * var externalService = Parallel.create(propagators).withSharedLimit(EXTERNAL_SERVICE_LIMIT);
+   * externalService.map(ids, id -> fetch(id)); // at most 10 calls in flight across all callers
+   * }</pre>
+   *
+   * <p>The limit applies to {@link #async}, {@link #map}, {@link #asMap}, {@link #toEither} and
+   * {@link #toEitherMap}. It combines with {@link #withMaxConcurrency(int)}: the shared limit
+   * protects the external service, and the per-call window stops a large batch from starting a
+   * virtual thread for every item up front.
+   *
+   * <p>Each task waits for its permit on its own virtual thread, so {@link #async} still returns
+   * immediately. Waiting is interruptible: a task cancelled while waiting never runs. With {@link
+   * #withTimeout(Duration)}, the timeout starts once the task holds its permit. The permit is
+   * released when the task's worker exits, so a timed-out task that is still running keeps it. The
+   * timeout does not bound the wait for a permit: if every permit is held by tasks that ignore
+   * interruption, waiting callers block until one of those tasks exits.
+   *
+   * <p>Do not wait from inside a task for other tasks that use the same semaphore, for example by
+   * calling {@link #map} or {@code async(...).get()}. If every permit is held by a task waiting in
+   * this way, they deadlock.
+   */
+  public Parallel withSharedLimit(Semaphore limit) {
+    Objects.requireNonNull(limit, "limit");
+    return new Parallel(propagators, maxConcurrency, timeout, limit);
   }
 
   /**
@@ -81,23 +126,25 @@ public final class Parallel {
    * a failed {@link Either}.
    *
    * <p>The timeout starts when each task is launched; time queued for a concurrency slot does not
-   * count. This is a per-task timeout, not a deadline for the batch.
+   * count. With {@link #withSharedLimit(Semaphore)}, it starts once the task holds its permit, so
+   * time spent waiting for a permit does not count either. This is a per-task timeout, not a
+   * deadline for the batch.
    *
    * <p>A timeout settles the task's result and interrupts its worker without waiting for cleanup.
    * Code that ignores interruption may keep running after its result has timed out. Callers remain
    * responsible for resource cleanup; submitted code must tolerate interruption and closed
    * resources.
    *
-   * <p>In bounded batches, a timed-out calculation keeps its concurrency slot until it finishes.
-   * Queued tasks can start only when a slot becomes available, so their progress depends on running
-   * calculations responding to cancellation.
+   * <p>In bounded batches, a timed-out calculation keeps its concurrency slot, and its shared-limit
+   * permit, until it finishes. Queued tasks can start only when a slot becomes available, so their
+   * progress depends on running calculations responding to cancellation.
    */
   public Parallel withTimeout(Duration timeout) {
     Objects.requireNonNull(timeout, "timeout");
     if (timeout.isNegative() || timeout.isZero()) {
       throw new IllegalArgumentException("timeout must be positive");
     }
-    return new Parallel(propagators, maxConcurrency, timeout);
+    return new Parallel(propagators, maxConcurrency, timeout, sharedLimit);
   }
 
   /**
@@ -105,7 +152,8 @@ public final class Parallel {
    * {@code get()} blocks until the result is available.
    *
    * <p>{@link #withMaxConcurrency(int)} does not affect this method — it only controls the sliding
-   * window in {@link #map} and {@link #toEither}. For bounded batch work, use {@link #map}.
+   * window in {@link #map} and {@link #toEither}. For bounded batch work, use {@link #map}. {@link
+   * #withSharedLimit(Semaphore)} does apply: the task waits for a permit before it runs.
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
@@ -307,12 +355,28 @@ public final class Parallel {
         Thread.ofVirtual()
             .unstarted(
                 () -> {
+                  var holdsPermit = false;
                   try {
+                    if (sharedLimit != null) {
+                      // Interruptible, so cancelling a waiting task stops it before it runs.
+                      sharedLimit.acquire();
+                      holdsPermit = true;
+                      // cancel() interrupts before it cancels the result, so check both.
+                      if (result.isDone() || Thread.currentThread().isInterrupted()) {
+                        result.completeExceptionally(new InterruptedException());
+                        return; // cancelled while waiting for the permit
+                      }
+                      startTimeout(result);
+                    }
                     final var value = callable.call();
                     result.complete(value);
                   } catch (Throwable failure) {
                     result.completeExceptionally(failure);
                   } finally {
+                    // Release on worker exit: a timed-out task may still be running.
+                    if (holdsPermit) {
+                      sharedLimit.release();
+                    }
                     onWorkerExit.run();
                   }
                 });
@@ -330,10 +394,16 @@ public final class Parallel {
         });
 
     worker.start();
+    if (sharedLimit == null) {
+      startTimeout(result);
+    }
+    return new VirtualTask<>(worker, result, latch);
+  }
+
+  private void startTimeout(CompletableFuture<?> result) {
     if (timeout != null) {
       result.orTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS);
     }
-    return new VirtualTask<>(worker, result, latch);
   }
 
   private static <R> Signal<R> takeFromQueue(LinkedBlockingQueue<Signal<R>> queue) {
