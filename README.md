@@ -27,23 +27,6 @@ var result = Blockless.get(CompletableFuture.supplyAsync(() -> "hello"));
 var answer = Blockless.get(() -> expensiveComputation());
 ```
 
-### Experimental platform-thread continuations
-
-The optional `blockless-continuations` module contains a Blockless-owned adapter
-with no third-party runtime dependencies. It uses native JVM continuations to
-suspend a synchronous-looking flow while its virtual-thread work is pending:
-
-```java
-Continuations.run(platformExecutor, () -> {
-    var user = Blockless.supplier(() -> loadUser(id)).get();
-    process(user);
-});
-```
-
-No annotations, enhancer, or agent are required. This experimental backend needs
-`--add-exports=java.base/jdk.internal.vm=ALL-UNNAMED` on the classpath.
-See [setup and limitations](blockless-continuations/README.md).
-
 ## Why `Blockless.get()`
 
 `CompletableFuture.join()` parks your thread inside the future's own internals.

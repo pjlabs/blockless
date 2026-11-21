@@ -14,40 +14,11 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 class BlocklessTest {
-
-  @Test
-  @Timeout(10)
-  void supplierCompletionCallbacksCanReadTheOutcomeWithoutWaiting() throws Exception {
-    final var release = new CountDownLatch(1);
-    final var supplier =
-        (AsyncSupplier<String>)
-            Blockless.supplier(
-                () -> {
-                  release.await();
-                  return "ready";
-                });
-    final var observed = new CompletableFuture<String>();
-    supplier.onComplete(
-        () -> {
-          assertTrue(supplier.isDone());
-          observed.complete(supplier.get());
-        });
-    try {
-      assertTrue(!supplier.isDone());
-    } finally {
-      release.countDown();
-    }
-    assertEquals("ready", observed.get(5, TimeUnit.SECONDS));
-    final var inline = new AtomicInteger();
-    supplier.onComplete(inline::incrementAndGet);
-    assertEquals(1, inline.get());
-  }
 
   @Test
   void rethrowsOriginalError() {

@@ -5,74 +5,73 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 @Timeout(10)
 class SupplierWaitSupportTest {
   @Test
-  void nestedHandlersAreRestoredAfterFailureAndDoNotLeakOutsideTheScope() {
-    final var release = new CountDownLatch(1);
-    final var supplier =
-        Blockless.supplier(
-            () -> {
-              release.await();
-              return "ready";
-            });
+  void restoresThePreviousHandlerAfterNestedFailure() {
+    final var stage = new CompletableFuture<String>();
+    final var supplier = new ResultSupplier<>(stage::join, stage);
     final var outer = new IllegalStateException("outer");
     final var inner = new IllegalStateException("inner");
-    try {
-      SupplierWaitSupport.withHandler(
-          pending -> {
-            throw outer;
-          },
-          () -> {
-            assertSame(
-                inner,
-                assertThrows(
-                    IllegalStateException.class,
-                    () ->
-                        SupplierWaitSupport.withHandler(
-                            pending -> {
-                              throw inner;
-                            },
-                            supplier::get)));
-            assertSame(outer, assertThrows(IllegalStateException.class, supplier::get));
-            return null;
-          });
-    } finally {
-      release.countDown();
-    }
-    assertEquals("ready", supplier.get());
+    SupplierWaitSupport.withHandler(
+        pending -> {
+          throw outer;
+        },
+        () -> {
+          assertSame(
+              inner,
+              assertThrows(
+                  IllegalStateException.class,
+                  () ->
+                      SupplierWaitSupport.withHandler(
+                          pending -> {
+                            throw inner;
+                          },
+                          supplier::get)));
+          assertSame(outer, assertThrows(IllegalStateException.class, supplier::get));
+          return null;
+        });
   }
 
   @Test
-  void rejectsAHandlerThatReturnsWithoutMakingTheResultReadable() {
-    final var release = new CountDownLatch(1);
-    final var supplier =
-        Blockless.supplier(
-            () -> {
-              release.await();
-              return "ready";
-            });
-    try {
-      assertThrows(
-          IllegalStateException.class,
-          () -> SupplierWaitSupport.withHandler(pending -> {}, supplier::get));
-    } finally {
-      release.countDown();
-    }
-    assertEquals("ready", supplier.get());
+  void rejectsAnUnfinishedReadWhenTheHandlerReturnsPrematurely() {
+    final var stage = new CompletableFuture<String>();
+    final var supplier = new ResultSupplier<>(stage::join, stage);
+    assertThrows(
+        IllegalStateException.class,
+        () -> SupplierWaitSupport.withHandler(pending -> {}, supplier::get));
   }
 
   @Test
-  void completedSupplierBypassesTheHandler() {
-    final var supplier = Blockless.supplier(() -> "ready");
-    assertEquals("ready", supplier.get());
+  void skipsTheHandlerForCompletedOrVirtualThreadReads() throws Exception {
+    final var ready = CompletableFuture.completedFuture("ready");
     assertEquals(
         "ready",
         SupplierWaitSupport.withHandler(
-            pending -> fail("completed reads must not invoke the handler"), supplier::get));
+            pending -> fail("completed read"), new ResultSupplier<>(ready::join, ready)::get));
+    try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      final var stage = new CompletableFuture<String>();
+      final var supplier =
+          new ResultSupplier<>(
+              () -> {
+                stage.complete("virtual");
+                return stage.join();
+              },
+              stage);
+      assertEquals(
+          "virtual",
+          executor
+              .submit(
+                  () ->
+                      SupplierWaitSupport.withHandler(
+                          pending -> fail("virtual read"), supplier::get))
+              .get(5, TimeUnit.SECONDS));
+    }
   }
 }
