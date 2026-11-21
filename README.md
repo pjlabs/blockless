@@ -94,7 +94,7 @@ Supplier<String> data = parallel.async(() -> fetchData());
 // Build a map in parallel
 Map<String, Profile> profiles = parallel.asMap(userIds, id -> loadProfile(id));
 
-// Limit concurrent tasks (extras park until a permit frees up)
+// At most 10 active tasks per map()/toEither() call (sliding window); async() is unaffected
 var boundedParallel = parallel.withMaxConcurrency(10);
 List<String> names = boundedParallel.map(userIds, id -> fetchName(id));
 
@@ -109,9 +109,15 @@ var safeParallel = parallel.withMaxConcurrency(10).withTimeout(Duration.ofSecond
 List<Either<String, Throwable>> results = parallel.toEither(ids, id -> riskyFetch(id));
 ```
 
-Timeouts apply to each task after it is launched. Time queued for a concurrency slot does not count,
-and the task timeout is not a deadline for the batch. `map()` throws a wrapped `TimeoutException`,
-while `toEither()` collects it as `Either.fail()` and continues processing the other items.
+`withMaxConcurrency(n)` is a per-call limit for `map()`, `toEither()`, `asMap()` and
+`toEitherMap()`, not a process-wide one: concurrent calls each get their own window, and `async()`
+ignores it. For a process-wide cap, guard the call with a shared `Semaphore` in your own code.
+
+Each task's worker is started before its timeout is registered. The timeout budget runs from
+registration; time queued for a concurrency slot and any delay before registration do not count.
+This is a per-task timeout, not a deadline from submission or for the whole batch. `map()` throws a
+wrapped `TimeoutException`, while `toEither()` collects it as `Either.fail()` and continues processing
+the other items.
 
 On failure, `map()` interrupts the other active workers without waiting for their cleanup. A task
 that ignores interruption may keep running after its result has timed out or the batch has returned.
