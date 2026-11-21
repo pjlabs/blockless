@@ -13,7 +13,7 @@ A tiny Java 21 library for virtual thread concurrency. Two things:
 
 Virtual-thread callers park while waiting, and your context tags along for the ride.
 To release a platform-thread caller while retaining synchronous-looking code, use the
-optional [continuation module](blockless-continuations/README.md).
+experimental [continuation module](blockless-continuations/README.md).
 
 Zero dependencies in core. Pluggable context propagation for MDC, gRPC, and OpenTelemetry.
 
@@ -26,6 +26,22 @@ var result = Blockless.get(CompletableFuture.supplyAsync(() -> "hello"));
 // Run a Callable on a virtual thread and get the result
 var answer = Blockless.get(() -> expensiveComputation());
 ```
+
+### Experimental platform-thread continuations
+
+The optional `blockless-continuations` module uses native JVM continuations to
+suspend a synchronous-looking flow while its virtual-thread work is pending:
+
+```java
+Continuations.run(platformExecutor, () -> {
+    var user = Blockless.supplier(() -> loadUser(id)).get();
+    process(user);
+});
+```
+
+No annotations, enhancer, or agent are required. This experimental backend needs
+`--add-exports=java.base/jdk.internal.vm=ALL-UNNAMED` on the classpath.
+See [setup and limitations](blockless-continuations/README.md).
 
 ## Why `Blockless.get()`
 
@@ -179,7 +195,7 @@ your service already has. No version conflicts.
 | `blockless-context-grpc` | gRPC context propagation |
 | `blockless-context-opentelemetry` | OpenTelemetry context propagation |
 | `blockless-tests` | Integration tests |
-| `blockless-continuations` | Optional bytecode continuations for platform executors |
+| `blockless-continuations` | Experimental native continuations for platform executors |
 
 ## Requirements
 

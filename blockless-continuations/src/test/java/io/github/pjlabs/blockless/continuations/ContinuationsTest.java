@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import org.apache.commons.javaflow.api.Continuation;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -77,7 +78,7 @@ class ContinuationsTest {
                 submissions.incrementAndGet();
                 command.run();
               },
-              new ContinuationTask() {
+              new Runnable() {
                 @Override
                 public void run() {
                   assertNull(supplier.get());
@@ -90,27 +91,11 @@ class ContinuationsTest {
     }
 
     @Test
-    void unsupportedSupplierIsRejectedBeforeItsPotentiallyBlockingBodyRuns() {
-      final Supplier<String> arbitrary =
-          () -> {
-            fail("must not invoke an arbitrary supplier on the platform thread");
-            return "unreachable";
-          };
-      final var completion =
-          Continuations.run(
-              Runnable::run,
-              new ContinuationTask() {
-                @Override
-                public void run() {
-                  arbitrary.get();
-                }
-              });
-      assertInstanceOf(
-          IllegalArgumentException.class,
-          assertThrows(
-                  ExecutionException.class,
-                  () -> completion.toCompletableFuture().get(5, TimeUnit.SECONDS))
-              .getCause());
+    void ordinarySuppliersKeepTheirUsualSemantics() throws Exception {
+      final Supplier<String> ordinary = () -> "value";
+      Continuations.run(Runnable::run, () -> assertEquals("value", ordinary.get()))
+          .toCompletableFuture()
+          .get(5, TimeUnit.SECONDS);
     }
 
     @Test
@@ -122,7 +107,7 @@ class ContinuationsTest {
         final var completion =
             Continuations.run(
                 executor,
-                new ContinuationTask() {
+                new Runnable() {
                   @Override
                   public void run() {
                     final var response =
@@ -163,7 +148,7 @@ class ContinuationsTest {
         final var completion =
             Continuations.run(
                 executor,
-                new ContinuationTask() {
+                new Runnable() {
                   @Override
                   public void run() {
                     assertFalse(Thread.currentThread().isVirtual());
@@ -210,7 +195,7 @@ class ContinuationsTest {
         final var completion =
             Continuations.run(
                 executor,
-                new ContinuationTask() {
+                new Runnable() {
                   @Override
                   public void run() {
                     try {
@@ -239,7 +224,7 @@ class ContinuationsTest {
         final var completion =
             Continuations.run(
                 executor,
-                new ContinuationTask() {
+                new Runnable() {
                   @Override
                   public void run() {
                     try {
@@ -270,7 +255,7 @@ class ContinuationsTest {
         final var completion =
             Continuations.run(
                 executor,
-                new ContinuationTask() {
+                new Runnable() {
                   @Override
                   public void run() {
                     final var parallel = Parallel.create();
@@ -298,7 +283,7 @@ class ContinuationsTest {
           final var completion =
               Continuations.run(
                   executor,
-                  new ContinuationTask() {
+                  new Runnable() {
                     @Override
                     public void run() {
                       Blockless.get(
@@ -337,12 +322,13 @@ class ContinuationsTest {
 
             @Override
             public Integer get() {
+              Continuation.suspend(this);
               return reads.incrementAndGet();
             }
           };
       Continuations.run(
               Runnable::run,
-              new ContinuationTask() {
+              new Runnable() {
                 @Override
                 public void run() {
                   for (int i = 0; i < 20_000; i++) {
@@ -361,7 +347,7 @@ class ContinuationsTest {
       try (final var executor = Executors.newVirtualThreadPerTaskExecutor()) {
         Continuations.run(
                 executor,
-                new ContinuationTask() {
+                new Runnable() {
                   @Override
                   public void run() {
                     final var value =
@@ -409,7 +395,7 @@ class ContinuationsTest {
         final var completion =
             Continuations.run(
                 executor,
-                new ContinuationTask() {
+                new Runnable() {
                   @Override
                   public void run() {
                     assertEquals("request", context.get());
@@ -436,7 +422,7 @@ class ContinuationsTest {
               command -> {
                 throw new RejectedExecutionException("closed");
               },
-              new ContinuationTask() {
+              new Runnable() {
                 @Override
                 public void run() {
                   fail("must not execute");
@@ -451,7 +437,6 @@ class ContinuationsTest {
     }
   }
 
-  @Suspendable
   private static String nested(Supplier<String> supplier, long value) {
     final var prefix = "nested" + value;
     return prefix + supplier.get();

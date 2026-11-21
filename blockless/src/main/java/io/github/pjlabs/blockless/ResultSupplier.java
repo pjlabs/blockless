@@ -14,6 +14,7 @@ final class ResultSupplier<T> implements AsyncSupplier<T> {
 
   @Override
   public T get() {
+    SupplierWaitSupport.await(this);
     return value.get();
   }
 

@@ -1,23 +1,21 @@
 package io.github.pjlabs.blockless.continuations;
 
 import io.github.pjlabs.blockless.AsyncSupplier;
-import io.github.pjlabs.blockless.Blockless;
 import io.github.pjlabs.blockless.CallableContext;
 import io.github.pjlabs.blockless.ContextPropagator;
+import io.github.pjlabs.blockless.SupplierWaitSupport;
 import java.util.Objects;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Supplier;
 import org.apache.commons.javaflow.api.Continuation;
-import org.apache.commons.javaflow.core.Skip;
 
-/** Schedules bytecode continuations around Blockless supplier reads. */
+/**
+ * Experimental native continuations around Blockless supplier reads. Requires Java 21+ with
+ * java.base/jdk.internal.vm exported to this module (or ALL-UNNAMED on the classpath).
+ */
 public final class Continuations {
-  private static final ThreadLocal<Boolean> ACTIVE = new ThreadLocal<>();
-
   private Continuations() {}
 
   /**
@@ -27,44 +25,19 @@ public final class Continuations {
    * The returned stage reports task completion or failure; it does not expose cancellation.
    */
   public static CompletionStage<Void> run(
-      Executor executor, ContinuationTask task, ContextPropagator... propagators) {
+      Executor executor, Runnable task, ContextPropagator... propagators) {
     Objects.requireNonNull(executor, "executor");
     Objects.requireNonNull(task, "task");
-    if (!task.getClass().isAnnotationPresent(Skip.class)) {
-      throw new IllegalArgumentException(
-          "ContinuationTask must be enhanced by ContinuationEnhancer");
+    final var apiModule = Continuation.class.getModule();
+    if (!Object.class.getModule().isExported("jdk.internal.vm", apiModule)) {
+      final var target = apiModule.isNamed() ? apiModule.getName() : "ALL-UNNAMED";
+      throw new IllegalStateException(
+          "Experimental native continuations require --add-exports=java.base/jdk.internal.vm="
+              + target);
     }
     final var runner = new Runner(executor, task, propagators);
     runner.signal();
     return runner.completion.minimalCompletionStage();
-  }
-
-  /** Bytecode target for Supplier.get(). Application code uses the ordinary supplier API. */
-  @Suspendable
-  public static <T> T await(Supplier<T> supplier) {
-    Objects.requireNonNull(supplier, "supplier");
-    if (!Boolean.TRUE.equals(ACTIVE.get()) || Thread.currentThread().isVirtual()) {
-      return supplier.get();
-    }
-    if (!(supplier instanceof AsyncSupplier<?> asynchronous)) {
-      throw new IllegalArgumentException("Only Blockless.supplier and Parallel.async can suspend");
-    }
-    if (!asynchronous.isDone()) {
-      Continuation.suspend(asynchronous);
-    }
-    return supplier.get();
-  }
-
-  /** Bytecode target for Blockless.get(Callable). */
-  @Suspendable
-  public static <T> T get(Callable<T> callable) {
-    return await(Blockless.supplier(callable));
-  }
-
-  /** Bytecode target for Blockless.get(CompletionStage). */
-  @Suspendable
-  public static <T> T get(CompletionStage<T> stage) {
-    return await(Blockless.supplier(stage));
   }
 
   private static final class Runner {
@@ -75,10 +48,13 @@ public final class Continuations {
     // Confined to the serialized drain; a suspended continuation is resumed exactly once.
     private Continuation continuation;
 
-    private Runner(Executor executor, ContinuationTask task, ContextPropagator[] propagators) {
+    private Runner(Executor executor, Runnable task, ContextPropagator[] propagators) {
       this.executor = executor;
       continuation = Continuation.startSuspendedWith(task, true);
-      final var captured = CallableContext.wrap(this::advance, propagators);
+      final var captured =
+          CallableContext.wrap(
+              () -> SupplierWaitSupport.withHandler(Continuation::suspend, this::advance),
+              propagators);
       drain =
           () -> {
             try {
@@ -103,29 +79,19 @@ public final class Continuations {
     }
 
     private boolean advance() {
-      final var previous = ACTIVE.get();
-      ACTIVE.set(true);
-      try {
-        do {
-          continuation = continuation.resume();
-          if (continuation == null) {
-            return true;
-          }
-          if (!(continuation.value() instanceof AsyncSupplier<?> pending)) {
-            throw new IllegalStateException("Unexpected continuation suspension");
-          }
-          // Register only after the complete stack has unwound. Inline notification increments
-          // signals instead of recursively resuming, including with a direct executor.
-          pending.onComplete(this::signal);
-        } while (signals.decrementAndGet() != 0);
-        return false;
-      } finally {
-        if (previous == null) {
-          ACTIVE.remove();
-        } else {
-          ACTIVE.set(previous);
+      do {
+        continuation = continuation.resume();
+        if (continuation == null) {
+          return true;
         }
-      }
+        if (!(continuation.value() instanceof AsyncSupplier<?> pending)) {
+          throw new IllegalStateException("Unexpected continuation suspension");
+        }
+        // Register only after the complete stack has unwound. Inline notification increments
+        // signals instead of recursively resuming, including with a direct executor.
+        pending.onComplete(this::signal);
+      } while (signals.decrementAndGet() != 0);
+      return false;
     }
   }
 }
