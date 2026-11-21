@@ -11,7 +11,9 @@ A tiny Java 21 library for virtual thread concurrency. Two things:
 1. **`Blockless.get()`** — wait for async results safely, without entering the future's internals
 2. **`Parallel`** — fan out work on virtual threads, collect results, keep your trace context
 
-Virtual-thread callers park while waiting, and your context tags along for the ride.
+So you can wait on async results without calling their blocking methods, and your context tags
+along for the ride.
+
 To release a platform-thread caller while retaining synchronous-looking code, use the
 experimental [continuation module](blockless-continuations/README.md).
 
@@ -20,7 +22,7 @@ Zero dependencies in core. Pluggable context propagation for MDC, gRPC, and Open
 ## Quick start
 
 ```java
-// On a virtual thread, park until the CompletionStage completes
+// Wait for a CompletionStage without calling its blocking methods
 var result = Blockless.get(CompletableFuture.supplyAsync(() -> "hello"));
 
 // Run a Callable on a virtual thread and get the result
@@ -33,16 +35,16 @@ var answer = Blockless.get(() -> expensiveComputation());
 If that implementation uses `synchronized` or you're on a platform thread, you
 could block or pin.
 
-`Blockless.get()` registers a completion callback and waits using JDK thread/latch
-primitives rather than calling the stage's `join()` or `get()`. A virtual-thread
-caller parks. An ordinary platform-thread caller still blocks until the result
-is ready; starting the worker on a virtual thread does not free the caller.
+`Blockless.get()` registers a completion callback and waits on a `CountDownLatch`
+through a shared `OutcomeSupplier`. It does not call the future's blocking methods
+or create an extra waiting thread. Virtual-thread callers park on the latch;
+ordinary platform-thread callers block until the outcome is available.
 
 ```java
-// Parks inside CompletableFuture internals — you're at the mercy of the implementation.
+// Wait inside CompletableFuture. May run other pending callbacks on the caller thread.
 String result = someFuture.join();
 
-// Waits using a thread/latch; virtual-thread callers can park.
+// Wait on a latch released by a completion callback. The wait itself runs no callbacks.
 String result = Blockless.get(someFuture);
 ```
 

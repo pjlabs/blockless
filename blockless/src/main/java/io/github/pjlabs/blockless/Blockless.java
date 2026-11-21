@@ -1,12 +1,7 @@
 package io.github.pjlabs.blockless;
 
 import java.util.concurrent.Callable;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 public class Blockless {
@@ -24,54 +19,23 @@ public class Blockless {
    * Returns a supplier that will block until the completion stage is complete. Use when you want to
    * eagerly run the completion stage now and get the result later in execution.
    *
-   * <p>An interruption while waiting affects only that invocation.
+   * <p>Once completed, the supplier reads the cached outcome without waiting, even if the caller is
+   * interrupted. An interruption while waiting affects only that invocation.
    *
    * @param stage the completion stage
    * @param <T> the type of the value
    * @return a supplier that will block until the completion stage is complete
    */
   public static <T> Supplier<T> supplier(CompletionStage<T> stage) {
-    final var result = new AtomicReference<T>();
-    final var throwable = new AtomicReference<Throwable>();
-    final var latch = new CountDownLatch(1);
-    final var completion = new CompletableFuture<Void>();
-    stage.whenComplete(
-        (T v, Throwable t) -> {
-          if (t != null) {
-            throwable.set(t);
-          } else {
-            result.set(v);
-          }
-          latch.countDown();
+    final var outcome = new OutcomeSupplier<T>();
+    // handle, not whenComplete: on JDK 21, whenComplete on a failed stage wraps the failure in
+    // new CompletionException(failure), which calls its toString and can throw.
+    stage.handle(
+        (value, failure) -> {
+          outcome.complete(value, failure);
+          return null;
         });
-    final var thread =
-        Thread.startVirtualThread(
-            () -> {
-              try {
-                latch.await();
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throwable.set(e);
-              } finally {
-                completion.complete(null);
-              }
-            });
-    return new ResultSupplier<>(
-        () -> {
-          try {
-            if (!completion.isDone()) {
-              thread.join();
-            }
-          } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw wrapIfChecked(e);
-          }
-          if (throwable.get() != null) {
-            throw wrapIfChecked(throwable.get());
-          }
-          return result.get();
-        },
-        completion);
+    return outcome;
   }
 
   /**
@@ -97,40 +61,19 @@ public class Blockless {
    * @return a supplier that waits for the value of the callable
    */
   public static <T> Supplier<T> supplier(Callable<T> callable) {
-    final var result = new CompletableFuture<T>();
-    final var latch = new CountDownLatch(1);
+    final var outcome = new OutcomeSupplier<T>();
     Thread.startVirtualThread(
         () -> {
           try {
-            result.complete(callable.call());
-          } catch (Throwable failure) {
-            if (failure instanceof InterruptedException) {
-              Thread.currentThread().interrupt();
-            }
-            // exceptionNow() unwraps one CompletionException; preserve the original failure.
-            result.completeExceptionally(new CompletionException(failure));
-          } finally {
-            latch.countDown();
+            outcome.complete(callable.call(), null);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            outcome.complete(null, e);
+          } catch (Throwable t) {
+            outcome.complete(null, t);
           }
         });
-    return new ResultSupplier<>(
-        () -> {
-          if (!result.isDone()) {
-            try {
-              latch.await();
-            } catch (InterruptedException e) {
-              Thread.currentThread().interrupt();
-              throw wrapIfChecked(e);
-            }
-          }
-          return switch (result.state()) {
-            case SUCCESS -> result.resultNow();
-            case FAILED -> throw wrapIfChecked(result.exceptionNow());
-            case CANCELLED -> throw new CancellationException();
-            case RUNNING -> throw new IllegalStateException("Result not completed");
-          };
-        },
-        result);
+    return outcome;
   }
 
   /**
@@ -143,19 +86,5 @@ public class Blockless {
    */
   public static <T> T get(Callable<T> callable) {
     return supplier(callable).get();
-  }
-
-  /**
-   * Rethrows RuntimeException and Error subclasses directly; wraps checked exceptions in
-   * RuntimeException.
-   */
-  private static RuntimeException wrapIfChecked(Throwable t) {
-    if (t instanceof RuntimeException re) {
-      return re;
-    }
-    if (t instanceof Error error) {
-      throw error;
-    }
-    return new RuntimeException(t);
   }
 }
