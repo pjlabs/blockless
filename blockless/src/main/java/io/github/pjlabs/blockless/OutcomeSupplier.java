@@ -27,7 +27,6 @@ final class OutcomeSupplier<T> implements AsyncSupplier<T> {
 
   @Override
   public T get() {
-    SupplierWaitSupport.await(this);
     // Skip await() once completed, so an interrupted caller still gets the outcome.
     if (!result.isDone()) {
       try {

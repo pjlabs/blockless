@@ -8,11 +8,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import io.github.pjlabs.blockless.AsyncSupplier;
-import io.github.pjlabs.blockless.Blockless;
 import io.github.pjlabs.blockless.ContextPropagator;
-import io.github.pjlabs.blockless.Parallel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -28,6 +27,36 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 @Timeout(15)
 class ContinuationsTest {
+  @Test
+  void nestedSuppliersStartInParallelFromAVirtualCallerWithADirectExecutor() throws Exception {
+    final var started = new CountDownLatch(2);
+    final var release = new CountDownLatch(1);
+    final Callable<Integer> body =
+        () -> {
+          started.countDown();
+          release.await();
+          return 1;
+        };
+    try (final var callers = Executors.newVirtualThreadPerTaskExecutor()) {
+      final var caller =
+          callers.submit(
+              () -> {
+                final var first = Continuations.supplier(Runnable::run, body);
+                final var second = Continuations.supplier(Runnable::run, body);
+                return first.get() + second.get();
+              });
+      try {
+        assertTrue(
+            started.await(5, TimeUnit.SECONDS), "both bodies must start before either finishes");
+        release.countDown();
+        assertEquals(2, caller.get(5, TimeUnit.SECONDS));
+      } finally {
+        release.countDown();
+        caller.cancel(true);
+      }
+    }
+  }
+
   @Test
   void pendingReadCannotDeadlockTheOnlyWorkerNeededToRunTheTask() throws Exception {
     try (final var executor = Executors.newSingleThreadExecutor()) {
@@ -58,7 +87,7 @@ class ContinuationsTest {
               executor,
               () -> {
                 entries.incrementAndGet();
-                return "saved:" + Blockless.get(stage);
+                return "saved:" + stage.get();
               });
       final var combined = Continuations.supplier(executor, () -> "[" + value.get() + "]");
       executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
@@ -79,7 +108,7 @@ class ContinuationsTest {
   @ParameterizedTest
   @NullSource
   @ValueSource(strings = "changed inside flow")
-  void preservesContextChangesAndRestoresBothWorkers(String changed) throws Exception {
+  void plainBlockingBodyPreservesContextAndReleasesBothWorkers(String changed) throws Exception {
     final var stage = new CompletableFuture<String>();
     final var entries = new AtomicInteger();
     final var cleanups = new AtomicInteger();
@@ -97,24 +126,28 @@ class ContinuationsTest {
               () -> {
                 entries.incrementAndGet();
                 try {
+                  final var bodyThread = Thread.currentThread();
+                  assertTrue(bodyThread.isVirtual());
                   assertEquals("request", context.get());
                   if (changed == null) context.remove();
                   else context.set(changed);
                   final var result = nested(stage, 42L);
                   assertEquals(changed, context.get());
-                  assertEquals("resume", Thread.currentThread().getName());
-                  assertFalse(Thread.currentThread().isVirtual());
+                  assertSame(bodyThread, Thread.currentThread());
                   return result;
                 } finally {
                   cleanups.incrementAndGet();
                 }
               },
               new ThreadContext(context));
+      final var completionThread = new CompletableFuture<String>();
+      completion.onComplete(() -> completionThread.complete(Thread.currentThread().getName()));
       assertEquals("first worker", first.submit(context::get).get(5, TimeUnit.SECONDS));
       assertFalse(completion.isDone());
       assertEquals(0, cleanups.get());
       stage.complete("ready");
       assertEquals("saved42ready", await(completion));
+      assertEquals("resume", completionThread.get(5, TimeUnit.SECONDS));
       assertEquals(1, entries.get());
       assertEquals(1, cleanups.get());
       assertEquals("second worker", second.submit(context::get).get(5, TimeUnit.SECONDS));
@@ -134,7 +167,7 @@ class ContinuationsTest {
           Continuations.supplier(
               executor,
               () -> {
-                Blockless.get(stage);
+                stage.get();
                 throw failure;
               });
       final var completion = Continuations.supplier(executor, value::get);
@@ -144,15 +177,16 @@ class ContinuationsTest {
     }
   }
 
-  @Test
-  void rejectedResumeUnwindsFinallyBeforeCompletingTheResult() throws Exception {
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void executorShutdownPreservesBodyOutcomeAndWaitsForCleanup(boolean fails) throws Exception {
     final var stage = new CompletableFuture<String>();
     final var cleanup = new CompletableFuture<Void>();
     final var cleanupStarted = new CountDownLatch(1);
     final var cleanups = new AtomicInteger();
-    final var continued = new AtomicBoolean();
     final var cleanupIsVirtual = new AtomicBoolean();
     final var context = new ThreadLocal<String>();
+    final var failure = new IllegalStateException("body failed");
     context.set("request");
     try (final var executor = Executors.newSingleThreadExecutor()) {
       final var completion =
@@ -161,14 +195,14 @@ class ContinuationsTest {
               () -> {
                 context.set("changed before rejection");
                 try {
-                  Blockless.get(stage);
-                  continued.set(true);
-                  return "unexpected success";
+                  final var value = stage.get();
+                  if (fails) throw failure;
+                  return value;
                 } finally {
                   assertEquals("changed before rejection", context.get());
                   cleanupIsVirtual.set(Thread.currentThread().isVirtual());
                   cleanupStarted.countDown();
-                  Blockless.get(cleanup);
+                  cleanup.get();
                   cleanups.incrementAndGet();
                 }
               },
@@ -180,9 +214,10 @@ class ContinuationsTest {
       assertTrue(cleanupIsVirtual.get());
       assertFalse(completion.isDone(), "cleanup must finish before the result is published");
       cleanup.complete(null);
-      assertThrows(RejectedExecutionException.class, () -> await(completion));
+      if (fails)
+        assertSame(failure, assertThrows(IllegalStateException.class, () -> await(completion)));
+      else assertEquals("ready", await(completion));
       assertEquals(1, cleanups.get());
-      assertFalse(continued.get());
       assertEquals("request", context.get());
 
       // An initial rejection must not start the task on the cleanup thread.
@@ -227,9 +262,9 @@ class ContinuationsTest {
         failure.getMessage().contains("--add-exports=java.base/jdk.internal.vm=ALL-UNNAMED"));
   }
 
-  private static String nested(CompletableFuture<String> stage, long number) {
+  private static String nested(CompletableFuture<String> stage, long number) throws Exception {
     final var prefix = "saved" + number;
-    return prefix + Parallel.create().async(stage::join).get();
+    return prefix + stage.get();
   }
 
   private static <T> T await(AsyncSupplier<T> supplier) throws Exception {

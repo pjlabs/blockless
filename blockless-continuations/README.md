@@ -1,8 +1,8 @@
 # Experimental continuations
 
-Runs synchronous-looking code on a platform executor and releases its worker
-while a Blockless supplier is pending. This requires an explicit
-`Continuations.supplier` boundary. Pending reads of its result on ordinary
+`Continuations.supplier` runs its callable on a virtual thread, so ordinary
+blocking calls can use virtual-thread parking. A native continuation releases
+the supplied executor's worker until the body finishes. Pending result reads on ordinary
 platform threads throw `IllegalStateException` instead of waiting.
 Uses an internal OpenJDK API. No third-party runtime dependencies, annotations,
 or agent.
@@ -19,15 +19,17 @@ Missing exports fail before the task runs.
 
 ```java
 var user = Continuations.supplier(platformExecutor, () -> {
-    var details = Blockless.supplier(() -> loadDetails(id));
-    var permissions = Blockless.supplier(() -> loadPermissions(id));
+    var details = Continuations.supplier(platformExecutor, () -> loadDetails(id));
+    var permissions = Continuations.supplier(platformExecutor, () -> loadPermissions(id));
     return buildUser(details.get(), permissions.get());
 });
 ```
 
 `supplier` starts eagerly and returns an `AsyncSupplier<T>` (a `Supplier<T>`)
-with a cached value or failure. Its pending `get()` suspends callers inside another
-continuation or parks virtual-thread callers. Ordinary platform threads can read
+with a cached value or failure. The callable supports checked exceptions and
+plain blocking code; no `Blockless.get` wrapper is required. Nested suppliers fork
+independent work, and their pending reads park the virtual-thread caller.
+Ordinary platform threads can read
 completed outcomes; pending reads throw to prevent executor starvation.
 Tasks without a value can return `null`.
 An optional `onComplete` callback runs once the outcome is readable, including on failure.
@@ -35,20 +37,19 @@ An optional `onComplete` callback runs once the outcome is readable, including o
 Use an application-owned executor that queues work and throws when rejecting it.
 It must not silently discard accepted tasks, including during shutdown.
 Submitting returns immediately. Suspension preserves
-the stack and locals. Completion schedules a resume on the same executor, possibly
-on a different thread. Task failures are thrown at `get()`.
+the native waiter's stack. Completion resumes that waiter on the executor to
+publish the outcome. The user's body remains on its own virtual thread throughout.
+Task failures are thrown at `get()`.
 
-- Supports `Blockless.get`, `Blockless.supplier(...).get()`, and `Parallel.async(...).get()`.
-  Direct I/O and other blocking calls in the task body still block.
-- Optional context propagators capture context at submission and before each
-  suspension. Changes, including clearing context, survive resumption; each
-  worker's previous context is restored afterward.
-- Do not hold monitors, native frames, locks, or thread-affine resources across
-  suspension. JVM pinning can prevent yielding.
-- If the executor rejects a resume, a fallback virtual thread raises the rejection
-  at the suspended read. `finally` blocks run before the outcome is published and
-  can wait for asynchronous cleanup. An initial rejection does not start the task.
-- Cancellation is unsupported; shutting down the executor does not cancel pending I/O.
+- Context propagators capture at submission and attach for the body's lifetime.
+  Changes, including clearing context, survive blocking calls. Executor workers
+  have their previous context restored afterward.
+- Standard virtual-thread limitations apply, including monitor pinning on Java 21
+  and blocking native code.
+- Initial executor rejection prevents the body from starting. Rejected completion
+  resumes use a fallback virtual thread to publish the actual value or failure.
+  The body is never restarted; its `finally` blocks finish before publication.
+- Cancellation is unsupported; executor shutdown does not cancel a running body.
 
 Run `mvn clean verify`. Maven configures the internal API exports for compilation,
 Javadoc, and tests. Compatibility with future JDKs is not guaranteed.

@@ -4,41 +4,39 @@ import io.github.pjlabs.blockless.AsyncSupplier;
 import io.github.pjlabs.blockless.Blockless;
 import io.github.pjlabs.blockless.CallableContext;
 import io.github.pjlabs.blockless.ContextPropagator;
-import io.github.pjlabs.blockless.SupplierWaitSupport;
-import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Supplier;
 import jdk.internal.vm.Continuation;
 import jdk.internal.vm.ContinuationScope;
 
 /**
- * Experimental native continuations around Blockless supplier reads. Requires Java 21+ with
- * java.base/jdk.internal.vm exported to this module (or ALL-UNNAMED on the classpath).
+ * Experimental virtual-thread suppliers with a native continuation for the executor-side wait.
+ * Requires Java 21+ with java.base/jdk.internal.vm exported to this module (or ALL-UNNAMED on the
+ * classpath).
  */
 public final class Continuations {
   private Continuations() {}
 
   /**
-   * Starts a value-producing continuation immediately and returns a supplier of its cached outcome.
-   * Pending reads inside another continuation suspend that caller; virtual-thread reads park, and
-   * pending reads on ordinary platform threads outside a continuation throw IllegalStateException.
-   * Task failures are thrown at get().
+   * Dispatches work onto a virtual thread and returns a supplier of its cached outcome. A native
+   * continuation releases the executor worker while the body runs, including ordinary blocking I/O.
+   * Virtual-thread callers park on pending reads. Pending reads on platform threads throw
+   * IllegalStateException. Task failures are thrown at get().
    *
-   * <p>Initial execution and subsequent resumes use {@code executor}; use a queuing executor to
-   * release the submitting thread. Context is captured at submission and refreshed at each
-   * suspension. Each resume attaches that state and restores the executor thread's previous context
+   * <p>Use a queuing executor for dispatch and completion. The body always runs on a virtual
+   * thread; configured context is captured at submission and attached for the body's lifetime.
+   * Changes survive blocking calls. Executor workers have their previous context restored
    * afterward. Tasks without a value can return {@code null}.
    *
-   * <p>If a resume is rejected, the rejection is thrown at the suspended read on a fallback virtual
-   * thread. The result becomes readable after the task exits, including its finally blocks.
+   * <p>An initial rejection prevents the body from starting. If a completion resume is rejected, a
+   * fallback virtual thread publishes the body's outcome. The body is never restarted and its
+   * finally blocks finish before the outcome becomes readable.
    */
   public static <T> AsyncSupplier<T> supplier(
-      Executor executor, Supplier<T> task, ContextPropagator... propagators) {
+      Executor executor, Callable<T> task, ContextPropagator... propagators) {
     Objects.requireNonNull(executor, "executor");
     Objects.requireNonNull(task, "task");
     final var apiModule = Continuations.class.getModule();
@@ -56,11 +54,9 @@ public final class Continuations {
   private record ContinuationResult<T>(AsyncSupplier<T> result) implements AsyncSupplier<T> {
     @Override
     public T get() {
-      if (!result.isDone()
-          && !Thread.currentThread().isVirtual()
-          && Continuation.getCurrentContinuation(Runner.SCOPE) == null) {
+      if (!result.isDone() && !Thread.currentThread().isVirtual()) {
         throw new IllegalStateException(
-            "Pending continuation results require a continuation or virtual-thread caller");
+            "Pending continuation results require a virtual-thread caller");
       }
       return result.get();
     }
@@ -83,19 +79,25 @@ public final class Continuations {
     private final CompletableFuture<T> completion = new CompletableFuture<>();
     private final AtomicInteger signals = new AtomicInteger();
     private final Runnable drain;
-    private final List<ContextPropagator> propagators;
-    private Callable<Boolean> captured;
     // Confined to the serialized drain; a suspended continuation is resumed exactly once.
     private final Continuation continuation;
     private AsyncSupplier<?> pending;
-    private RejectedExecutionException rejection;
     private T value;
 
-    private Runner(Executor executor, Supplier<T> task, ContextPropagator[] propagators) {
+    private Runner(Executor executor, Callable<T> task, ContextPropagator[] propagators) {
       this.executor = executor;
-      this.propagators = List.of(propagators);
-      continuation = new Continuation(SCOPE, () -> value = task.get());
-      captured = captureContext();
+      final var work = CallableContext.wrap(task, propagators);
+      continuation =
+          new Continuation(
+              SCOPE,
+              () -> {
+                final var result = (AsyncSupplier<T>) Blockless.supplier(work);
+                if (!result.isDone()) {
+                  suspend(result);
+                }
+                value = result.get();
+              });
+      final var captured = CallableContext.wrap(this::advance, propagators);
       drain =
           () -> {
             try {
@@ -106,11 +108,6 @@ public final class Continuations {
               completion.completeExceptionally(failure);
             }
           };
-    }
-
-    private Callable<Boolean> captureContext() {
-      return CallableContext.wrap(
-          () -> SupplierWaitSupport.withHandler(this::suspend, this::advance), propagators);
     }
 
     private void signal() {
@@ -124,12 +121,8 @@ public final class Continuations {
           // Initial submission failed: the task has not acquired any resources yet.
           completion.completeExceptionally(failure);
         } else {
-          rejection =
-              failure instanceof RejectedExecutionException rejected
-                  ? rejected
-                  : new RejectedExecutionException("Cannot resume continuation", failure);
-          // Throw at the suspended read so Java unwinds the stack before publishing the outcome.
-          // A virtual thread also lets finally blocks wait for asynchronous cleanup.
+          // The body and its finally blocks have already finished. Publish its actual outcome,
+          // even if its executor has closed; never restart work or replace a successful result.
           Thread.ofVirtual().inheritInheritableThreadLocals(false).start(drain);
         }
       }
@@ -153,15 +146,9 @@ public final class Continuations {
     }
 
     private void suspend(AsyncSupplier<?> supplier) {
-      // Capture while the task is still running: changes survive resumption, and capture failures
-      // unwind through the task's own catch/finally blocks.
-      captured = captureContext();
       pending = supplier;
       if (!Continuation.yield(SCOPE)) {
         throw new IllegalStateException("Native continuation could not suspend");
-      }
-      if (rejection != null) {
-        throw rejection;
       }
     }
   }

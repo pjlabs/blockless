@@ -109,8 +109,7 @@ public final class Parallel {
    */
   public <T> Supplier<T> async(Supplier<T> task) {
     Objects.requireNonNull(task, "task");
-    final var running = startTask(task, (value, failure) -> {}, () -> {});
-    return new ResultSupplier<>(running::await, running.result());
+    return startTask(task, (value, failure) -> {}, () -> {})::await;
   }
 
   /**
@@ -271,9 +270,7 @@ public final class Parallel {
     // Waits until the future settles. orTimeout opens the latch without the worker exiting.
     R await() {
       try {
-        if (!result.isDone()) {
-          latch.await();
-        }
+        latch.await();
       } catch (InterruptedException e) {
         cancel();
         Thread.currentThread().interrupt();

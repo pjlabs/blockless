@@ -1,14 +1,12 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.github.pjlabs.blockless.continuations.Continuations;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -21,7 +19,6 @@ class SupplierCompletionTest {
         List.of(
             Blockless.supplier(stage),
             Blockless.supplier(stage::join),
-            Parallel.create().async(stage::join),
             Continuations.supplier(Runnable::run, () -> Blockless.get(stage)));
     final var results =
         sources.stream()
@@ -47,30 +44,14 @@ class SupplierCompletionTest {
   }
 
   @Test
-  void completionDuringRegistrationTrampolinesWithoutRecursiveResumption() throws Exception {
+  void racingBodyCompletionDoesNotLoseOrDuplicateResults() throws Exception {
     final var reads = new AtomicInteger();
-    final var result =
-        Continuations.supplier(
-            Runnable::run,
-            () -> {
-              for (int i = 0; i < 20_000; i++) {
-                final var ready =
-                    new CompletableFuture<Void>() {
-                      @Override
-                      public CompletableFuture<Void> whenComplete(
-                          BiConsumer<? super Void, ? super Throwable> action) {
-                        // Finish after the read suspended, immediately before registering its
-                        // callback.
-                        complete(null);
-                        return super.whenComplete(action);
-                      }
-                    };
-                final var supplier = new ResultSupplier<>(reads::incrementAndGet, ready);
-                assertEquals(i + 1, supplier.get());
-              }
-              return null;
-            });
-    assertNull(result.get());
+    for (int i = 0; i < 20_000; i++) {
+      final var result = Continuations.supplier(Runnable::run, reads::incrementAndGet);
+      final var ready = new CompletableFuture<Integer>();
+      result.onComplete(() -> ready.complete(result.get()));
+      assertEquals(i + 1, ready.get(5, TimeUnit.SECONDS));
+    }
     assertEquals(20_000, reads.get());
   }
 }
