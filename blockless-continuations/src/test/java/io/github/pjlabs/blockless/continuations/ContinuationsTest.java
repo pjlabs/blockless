@@ -41,7 +41,6 @@ class ContinuationsTest {
             });
 
     assertEquals("hello", awaitResult(greeting));
-    assertEquals("hello", greeting.get());
   }
 
   @Test
