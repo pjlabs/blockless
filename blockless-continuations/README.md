@@ -28,8 +28,8 @@ var completion = Continuations.run(platformExecutor, new ContinuationTask() {
 
 On a platform executor, an unfinished `get()` saves the live locals, operand stack,
 and resume location, then unwinds to the executor. Completion queues a resume on
-the same executor, which may choose a different thread. No thread waits for the
-supplier result. A completed supplier returns inline. On a virtual executor,
+the same executor, which may choose a different thread. The platform worker does
+not wait for the supplier result. A completed supplier returns inline. On a virtual executor,
 the ordinary supplier wait parks the virtual thread instead.
 
 `Blockless.get(Callable)` and `Blockless.get(CompletionStage)` are also suspension
