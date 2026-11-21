@@ -45,6 +45,7 @@
         <module>blockless-context-grpc</module>
         <module>blockless-context-opentelemetry</module>
         <module>blockless-tests</module>
+        <module>blockless-continuations</module>
     </modules>
 
     <properties>

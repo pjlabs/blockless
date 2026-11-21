@@ -34,6 +34,7 @@ public class Blockless {
     final var result = new AtomicReference<T>();
     final var throwable = new AtomicReference<Throwable>();
     final var latch = new CountDownLatch(1);
+    final var completion = new CompletableFuture<Void>();
     stage.whenComplete(
         (T v, Throwable t) -> {
           if (t != null) {
@@ -51,20 +52,26 @@ public class Blockless {
               } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throwable.set(e);
+              } finally {
+                completion.complete(null);
               }
             });
-    return () -> {
-      try {
-        thread.join();
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw wrapIfChecked(e);
-      }
-      if (throwable.get() != null) {
-        throw wrapIfChecked(throwable.get());
-      }
-      return result.get();
-    };
+    return new ResultSupplier<>(
+        () -> {
+          try {
+            if (!completion.isDone()) {
+              thread.join();
+            }
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw wrapIfChecked(e);
+          }
+          if (throwable.get() != null) {
+            throw wrapIfChecked(throwable.get());
+          }
+          return result.get();
+        },
+        completion);
   }
 
   /**
@@ -106,22 +113,24 @@ public class Blockless {
             latch.countDown();
           }
         });
-    return () -> {
-      if (!result.isDone()) {
-        try {
-          latch.await();
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw wrapIfChecked(e);
-        }
-      }
-      return switch (result.state()) {
-        case SUCCESS -> result.resultNow();
-        case FAILED -> throw wrapIfChecked(result.exceptionNow());
-        case CANCELLED -> throw new CancellationException();
-        case RUNNING -> throw new IllegalStateException("Result not completed");
-      };
-    };
+    return new ResultSupplier<>(
+        () -> {
+          if (!result.isDone()) {
+            try {
+              latch.await();
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw wrapIfChecked(e);
+            }
+          }
+          return switch (result.state()) {
+            case SUCCESS -> result.resultNow();
+            case FAILED -> throw wrapIfChecked(result.exceptionNow());
+            case CANCELLED -> throw new CancellationException();
+            case RUNNING -> throw new IllegalStateException("Result not completed");
+          };
+        },
+        result);
   }
 
   /**

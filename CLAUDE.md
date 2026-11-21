@@ -14,6 +14,8 @@ Published to Maven Central: `io.github.pjlabs:blockless`
 - `blockless-context-grpc` — gRPC Context propagation
 - `blockless-context-opentelemetry` — OpenTelemetry Context propagation
 - `blockless-tests` — Integration tests
+- `blockless-continuations` — Optional build-time supplier continuations using Tascalate JavaFlow;
+  core stays dependency-free. See `blockless-continuations/README.md` for enhancement and task boundaries.
 
 ## Build & Test
 
@@ -33,6 +35,8 @@ Java 21 required. No preview features.
 - Class names describe function — don't brand things "Blockless*" unless about blocking-without-blocking
 - Don't add `synchronized` blocks — they pin virtual threads
 - Don't add dependencies to the core module
+- Supplier readiness callbacks must be able to read the cached outcome without waiting. Preserve
+  this contract for `AsyncSupplier`, including exceptional outcomes and `Parallel.async` timeouts.
 - Don't copy names or patterns from other libraries (e.g., `nl.talsmasoftware.context`)
 
 ## Testing
