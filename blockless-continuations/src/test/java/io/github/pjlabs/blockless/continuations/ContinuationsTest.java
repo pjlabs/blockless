@@ -9,7 +9,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
-import io.github.pjlabs.blockless.AsyncSupplier;
 import io.github.pjlabs.blockless.Blockless;
 import io.github.pjlabs.blockless.ContextPropagator;
 import io.github.pjlabs.blockless.Parallel;
@@ -29,7 +28,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
-import org.apache.commons.javaflow.api.Continuation;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -303,42 +301,6 @@ class ContinuationsTest {
               failure, failure instanceof Error ? thrown.getCause() : thrown.getCause().getCause());
         }
       }
-    }
-
-    @Test
-    void completionDuringRegistrationTrampolinesInsteadOfRecursivelyResuming() throws Exception {
-      final var reads = new AtomicInteger();
-      final Supplier<Integer> readyDuringRegistration =
-          new AsyncSupplier<>() {
-            @Override
-            public boolean isDone() {
-              return false;
-            }
-
-            @Override
-            public void onComplete(Runnable action) {
-              action.run();
-            }
-
-            @Override
-            public Integer get() {
-              Continuation.suspend(this);
-              return reads.incrementAndGet();
-            }
-          };
-      Continuations.run(
-              Runnable::run,
-              new Runnable() {
-                @Override
-                public void run() {
-                  for (int i = 0; i < 20_000; i++) {
-                    assertEquals(i + 1, readyDuringRegistration.get());
-                  }
-                }
-              })
-          .toCompletableFuture()
-          .get(5, TimeUnit.SECONDS);
-      assertEquals(20_000, reads.get());
     }
 
     @Test

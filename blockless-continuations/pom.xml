@@ -12,22 +12,14 @@
     <name>blockless continuations (experimental)</name>
     <description>Experimental native JVM continuations for platform-thread supplier reads.</description>
     <properties>
-        <javaflow.version>2.9.0</javaflow.version>
+        <!-- javac requires source/target, rather than release, when exporting JDK internals. -->
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
     </properties>
     <dependencies>
         <dependency>
             <groupId>io.github.pjlabs</groupId>
             <artifactId>blockless</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>net.tascalate.javaflow</groupId>
-            <artifactId>net.tascalate.javaflow.api-jvmc</artifactId>
-            <version>${javaflow.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>org.slf4j</groupId>
-            <artifactId>slf4j-api</artifactId>
-            <version>${slf4j.version}</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -38,6 +30,27 @@
     </dependencies>
     <build>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <release combine.self="override"></release>
+                    <compilerArgs>
+                        <arg>--add-exports=java.base/jdk.internal.vm=ALL-UNNAMED</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <configuration>
+                    <release combine.self="override"></release>
+                    <source>21</source>
+                    <additionalOptions>
+                        <additionalOption>--add-exports=java.base/jdk.internal.vm=ALL-UNNAMED</additionalOption>
+                    </additionalOptions>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>

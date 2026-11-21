@@ -14,7 +14,7 @@ Published to Maven Central: `io.github.pjlabs:blockless`
 - `blockless-context-grpc` — gRPC Context propagation
 - `blockless-context-opentelemetry` — OpenTelemetry Context propagation
 - `blockless-tests` — Integration tests
-- `blockless-continuations` — Experimental native supplier continuations using Tascalate JavaFlow api-jvmc;
+- `blockless-continuations` — Experimental native supplier continuations using a small Blockless-owned JVM adapter;
   core stays dependency-free. See `blockless-continuations/README.md` for JVM exports and task boundaries. No enhancement or annotations.
 
 ## Build & Test

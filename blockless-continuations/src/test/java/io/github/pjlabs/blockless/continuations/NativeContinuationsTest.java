@@ -17,11 +17,43 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import jdk.internal.vm.Continuation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 @Timeout(15)
 class NativeContinuationsTest {
+  @Test
+  void aPinnedContinuationFailsWithoutWaitingAndRunsCleanup() throws Exception {
+    final var stage = new CompletableFuture<String>();
+    final var cleanups = new AtomicInteger();
+    try (final var executor = Executors.newSingleThreadExecutor()) {
+      final var completion =
+          Continuations.run(
+              executor,
+              () -> {
+                Continuation.pin();
+                try {
+                  Blockless.get(stage);
+                } finally {
+                  Continuation.unpin();
+                  cleanups.incrementAndGet();
+                }
+              });
+      try {
+        assertInstanceOf(
+            IllegalStateException.class,
+            assertThrows(
+                    ExecutionException.class,
+                    () -> completion.toCompletableFuture().get(5, TimeUnit.SECONDS))
+                .getCause());
+        assertEquals(1, cleanups.get());
+      } finally {
+        stage.complete("release stage waiter");
+      }
+    }
+  }
+
   @Test
   void aLambdaAndUnannotatedHelpersResumeOnADifferentPlatformWorker() throws Exception {
     final var stage = new CompletableFuture<String>();

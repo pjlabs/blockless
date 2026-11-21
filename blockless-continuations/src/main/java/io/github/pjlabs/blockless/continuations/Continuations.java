@@ -9,7 +9,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.commons.javaflow.api.Continuation;
+import jdk.internal.vm.Continuation;
+import jdk.internal.vm.ContinuationScope;
 
 /**
  * Experimental native continuations around Blockless supplier reads. Requires Java 21+ with
@@ -28,7 +29,7 @@ public final class Continuations {
       Executor executor, Runnable task, ContextPropagator... propagators) {
     Objects.requireNonNull(executor, "executor");
     Objects.requireNonNull(task, "task");
-    final var apiModule = Continuation.class.getModule();
+    final var apiModule = Continuations.class.getModule();
     if (!Object.class.getModule().isExported("jdk.internal.vm", apiModule)) {
       final var target = apiModule.isNamed() ? apiModule.getName() : "ALL-UNNAMED";
       throw new IllegalStateException(
@@ -41,20 +42,22 @@ public final class Continuations {
   }
 
   private static final class Runner {
+    // Initialize native types only after run() has checked the required JVM export.
+    private static final ContinuationScope SCOPE = new ContinuationScope("blockless");
     private final Executor executor;
     private final CompletableFuture<Void> completion = new CompletableFuture<>();
     private final AtomicInteger signals = new AtomicInteger();
     private final Runnable drain;
     // Confined to the serialized drain; a suspended continuation is resumed exactly once.
-    private Continuation continuation;
+    private final Continuation continuation;
+    private AsyncSupplier<?> pending;
 
     private Runner(Executor executor, Runnable task, ContextPropagator[] propagators) {
       this.executor = executor;
-      continuation = Continuation.startSuspendedWith(task, true);
+      continuation = new Continuation(SCOPE, task);
       final var captured =
           CallableContext.wrap(
-              () -> SupplierWaitSupport.withHandler(Continuation::suspend, this::advance),
-              propagators);
+              () -> SupplierWaitSupport.withHandler(this::suspend, this::advance), propagators);
       drain =
           () -> {
             try {
@@ -80,11 +83,12 @@ public final class Continuations {
 
     private boolean advance() {
       do {
-        continuation = continuation.resume();
-        if (continuation == null) {
+        pending = null;
+        continuation.run();
+        if (continuation.isDone()) {
           return true;
         }
-        if (!(continuation.value() instanceof AsyncSupplier<?> pending)) {
+        if (pending == null) {
           throw new IllegalStateException("Unexpected continuation suspension");
         }
         // Register only after the complete stack has unwound. Inline notification increments
@@ -92,6 +96,13 @@ public final class Continuations {
         pending.onComplete(this::signal);
       } while (signals.decrementAndGet() != 0);
       return false;
+    }
+
+    private void suspend(AsyncSupplier<?> supplier) {
+      pending = supplier;
+      if (!Continuation.yield(SCOPE)) {
+        throw new IllegalStateException("Native continuation could not suspend");
+      }
     }
   }
 }

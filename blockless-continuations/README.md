@@ -1,9 +1,14 @@
 # Experimental native continuations
 
-**Experimental:** this optional module uses Tascalate JavaFlow's experimental
-`net.tascalate.javaflow.api-jvmc` backend and an internal OpenJDK API. Its API and
-JDK compatibility may change. Core remains dependency-free and does not require
-JVM exports unless you opt in to continuations.
+**Experimental:** this optional module contains Blockless's own small adapter
+around OpenJDK's internal `jdk.internal.vm.Continuation` API. It has no third-party
+runtime dependencies. The JVM preserves the stack; Blockless owns supplier waits,
+scheduling, and context restoration. JDK compatibility may change. Core does not
+require JVM exports unless you opt in to continuations.
+
+CI builds and tests on Temurin Java 21 and 25. Compatibility with other JDK
+versions or JVM implementations must be checked explicitly; this is not a
+forward-compatibility guarantee for an internal JVM API.
 
 A task can use ordinary synchronous Java, including lambdas and unannotated helpers:
 
@@ -46,10 +51,11 @@ For a classpath application, start Java with:
 --add-exports=java.base/jdk.internal.vm=ALL-UNNAMED
 ```
 
-For an application running JavaFlow as a named module, export to its module:
+When running the continuation jar as a named module on the module path, export
+to its automatic module name:
 
 ```text
---add-exports=java.base/jdk.internal.vm=net.tascalate.javaflow.api
+--add-exports=java.base/jdk.internal.vm=blockless.continuations
 ```
 
 Set the flag in each runtime that executes continuations, including IDE launch
@@ -59,8 +65,8 @@ are required on Java 21.
 
 **No annotations, bytecode enhancer, or Java agent are needed.** When migrating
 from the bytecode backend, remove its enhancement plugin/agent and recompile
-from clean sources. Do not include both `net.tascalate.javaflow.api` and
-`net.tascalate.javaflow.api-jvmc`: they provide the same API packages.
+from clean sources. Remove any explicit JavaFlow dependencies left over from an
+earlier prototype; this module no longer requires them.
 
 This repository configures the runtime export for the continuation module's
 Surefire test JVM. Run all tests from the repository root:
@@ -106,8 +112,14 @@ signal to the scheduler. Callbacks are registered after the stack has unwound.
 An atomic signal counter serializes resumes and handles inline completion
 notification without recursive stack growth.
 
-See the [Tascalate JavaFlow 2.9.0 release notes](https://github.com/vsilaev/tascalate-javaflow/releases/tag/2.9.0)
-and [native-backend setup](https://github.com/vsilaev/tascalate-javaflow#important-notice-for-release-290).
-The state-machine alternative is described in
-[Kotlin's coroutine specification](https://kotlinlang.org/spec/asynchronous-programming-with-coroutines.html);
-this backend instead lets the JVM preserve the native continuation stack.
+The adapter calls the JVM's continuation constructor, `run`, `yield`, and
+`isDone` directly. The yielded supplier is stored in the runner until its
+completion callback schedules the next resume. Native scope initialization is
+deferred until the required export has been checked, so a missing flag produces
+an actionable error before any task runs.
+
+Building this optional module requires a compiler export too. Its Maven
+configuration uses Java 21 source/target settings because javac does not allow
+exporting JDK internals together with the release option. The Java 21 and 25 CI
+builds check source compatibility independently. Other modules retain their
+normal Java 21 release target.

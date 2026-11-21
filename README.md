@@ -29,7 +29,8 @@ var answer = Blockless.get(() -> expensiveComputation());
 
 ### Experimental platform-thread continuations
 
-The optional `blockless-continuations` module uses native JVM continuations to
+The optional `blockless-continuations` module contains a Blockless-owned adapter
+with no third-party runtime dependencies. It uses native JVM continuations to
 suspend a synchronous-looking flow while its virtual-thread work is pending:
 
 ```java
