@@ -5,7 +5,9 @@ import io.github.pjlabs.blockless.Blockless;
 import io.github.pjlabs.blockless.CallableContext;
 import io.github.pjlabs.blockless.ContextPropagator;
 import io.github.pjlabs.blockless.SupplierWaitSupport;
+import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
@@ -28,8 +30,9 @@ public final class Continuations {
    * Task failures are thrown at get().
    *
    * <p>Initial execution and subsequent resumes use {@code executor}; use a queuing executor to
-   * release the submitting thread. Each resume attaches the context captured here and restores the
-   * executor thread's previous context. Tasks without a value can return {@code null}.
+   * release the submitting thread. Context is captured at submission and refreshed at each
+   * suspension. Each resume attaches that state and restores the executor thread's previous context
+   * afterward. Tasks without a value can return {@code null}.
    *
    * <p>If a resume is rejected, the rejection is thrown at the suspended read on a fallback virtual
    * thread. The result becomes readable after the task exits, including its finally blocks.
@@ -80,6 +83,8 @@ public final class Continuations {
     private final CompletableFuture<T> completion = new CompletableFuture<>();
     private final AtomicInteger signals = new AtomicInteger();
     private final Runnable drain;
+    private final List<ContextPropagator> propagators;
+    private Callable<Boolean> captured;
     // Confined to the serialized drain; a suspended continuation is resumed exactly once.
     private final Continuation continuation;
     private AsyncSupplier<?> pending;
@@ -88,10 +93,9 @@ public final class Continuations {
 
     private Runner(Executor executor, Supplier<T> task, ContextPropagator[] propagators) {
       this.executor = executor;
+      this.propagators = List.of(propagators);
       continuation = new Continuation(SCOPE, () -> value = task.get());
-      final var captured =
-          CallableContext.wrap(
-              () -> SupplierWaitSupport.withHandler(this::suspend, this::advance), propagators);
+      captured = captureContext();
       drain =
           () -> {
             try {
@@ -102,6 +106,11 @@ public final class Continuations {
               completion.completeExceptionally(failure);
             }
           };
+    }
+
+    private Callable<Boolean> captureContext() {
+      return CallableContext.wrap(
+          () -> SupplierWaitSupport.withHandler(this::suspend, this::advance), propagators);
     }
 
     private void signal() {
@@ -144,6 +153,9 @@ public final class Continuations {
     }
 
     private void suspend(AsyncSupplier<?> supplier) {
+      // Capture while the task is still running: changes survive resumption, and capture failures
+      // unwind through the task's own catch/finally blocks.
+      captured = captureContext();
       pending = supplier;
       if (!Continuation.yield(SCOPE)) {
         throw new IllegalStateException("Native continuation could not suspend");

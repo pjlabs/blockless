@@ -40,8 +40,9 @@ on a different thread. Task failures are thrown at `get()`.
 
 - Supports `Blockless.get`, `Blockless.supplier(...).get()`, and `Parallel.async(...).get()`.
   Direct I/O and other blocking calls in the task body still block.
-- Optional context propagators attach the submission snapshot
-  on each resume and restore the executor thread afterward.
+- Optional context propagators capture context at submission and before each
+  suspension. Changes, including clearing context, survive resumption; each
+  worker's previous context is restored afterward.
 - Do not hold monitors, native frames, locks, or thread-affine resources across
   suspension. JVM pinning can prevent yielding.
 - If the executor rejects a resume, a fallback virtual thread raises the rejection
