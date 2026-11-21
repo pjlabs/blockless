@@ -2,8 +2,8 @@
 
 Runs synchronous-looking code on a platform executor and releases its worker
 while a Blockless supplier is pending. This requires an explicit
-`Continuations.supplier` boundary; ordinary platform-thread supplier reads
-outside it still wait.
+`Continuations.supplier` boundary. Pending reads of its result on ordinary
+platform threads throw `IllegalStateException` instead of waiting.
 Uses an internal OpenJDK API. No third-party runtime dependencies, annotations,
 or agent.
 
@@ -27,12 +27,14 @@ var user = Continuations.supplier(platformExecutor, () -> {
 
 `supplier` starts eagerly and returns an `AsyncSupplier<T>` (a `Supplier<T>`)
 with a cached value or failure. Its pending `get()` suspends callers inside another
-continuation, parks virtual-thread callers, and waits on ordinary platform-thread
-callers outside a continuation. Tasks without a value can return `null`.
+continuation or parks virtual-thread callers. Ordinary platform threads can read
+completed outcomes; pending reads throw to prevent executor starvation.
+Tasks without a value can return `null`.
 An optional `onComplete` callback runs once the outcome is readable, including on failure.
 
-Use an application-owned executor that queues work. The caller returns
-immediately; reading the result on that caller can still wait. Suspension preserves
+Use an application-owned executor that queues work and throws when rejecting it.
+It must not silently discard accepted tasks, including during shutdown.
+Submitting returns immediately. Suspension preserves
 the stack and locals. Completion schedules a resume on the same executor, possibly
 on a different thread. Task failures are thrown at `get()`.
 
@@ -42,8 +44,10 @@ on a different thread. Task failures are thrown at `get()`.
   on each resume and restore the executor thread afterward.
 - Do not hold monitors, native frames, locks, or thread-affine resources across
   suspension. JVM pinning can prevent yielding.
-- Cancellation is unsupported. If the executor rejects a resume, the supplier fails
-  and suspended cleanup cannot run.
+- If the executor rejects a resume, a fallback virtual thread raises the rejection
+  at the suspended read. `finally` blocks run before the outcome is published and
+  can wait for asynchronous cleanup. An initial rejection does not start the task.
+- Cancellation is unsupported; shutting down the executor does not cancel pending I/O.
 
 Run `mvn clean verify`. Maven configures the internal API exports for compilation,
 Javadoc, and tests. Compatibility with future JDKs is not guaranteed.

@@ -14,15 +14,37 @@ import io.github.pjlabs.blockless.Parallel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 @Timeout(15)
 class ContinuationsTest {
+  @Test
+  void pendingReadCannotDeadlockTheOnlyWorkerNeededToRunTheTask() throws Exception {
+    try (final var executor = Executors.newSingleThreadExecutor()) {
+      final var caller =
+          executor.submit(
+              () -> {
+                final var result = Continuations.supplier(executor, () -> 42);
+                assertThrows(IllegalStateException.class, result::get);
+                return result;
+              });
+      try {
+        final var result = caller.get(5, TimeUnit.SECONDS);
+        assertEquals(42, await(result));
+        assertEquals(42, result.get());
+      } finally {
+        caller.cancel(true);
+      }
+    }
+  }
+
   @Test
   void suppliersStartEagerlyAndReturnValuesAcrossSuspendedCallers() throws Exception {
     final var stage = new CompletableFuture<String>();
@@ -116,14 +138,46 @@ class ContinuationsTest {
   }
 
   @Test
-  void rejectedResumeCompletesTheTaskExceptionally() throws Exception {
+  void rejectedResumeUnwindsFinallyBeforeCompletingTheResult() throws Exception {
     final var stage = new CompletableFuture<String>();
+    final var cleanup = new CompletableFuture<Void>();
+    final var cleanupStarted = new CountDownLatch(1);
+    final var cleanups = new AtomicInteger();
+    final var continued = new AtomicBoolean();
+    final var cleanupIsVirtual = new AtomicBoolean();
     try (final var executor = Executors.newSingleThreadExecutor()) {
-      final var completion = Continuations.supplier(executor, () -> Blockless.get(stage));
+      final var completion =
+          Continuations.supplier(
+              executor,
+              () -> {
+                try {
+                  Blockless.get(stage);
+                  continued.set(true);
+                  return "unexpected success";
+                } finally {
+                  cleanupIsVirtual.set(Thread.currentThread().isVirtual());
+                  cleanupStarted.countDown();
+                  Blockless.get(cleanup);
+                  cleanups.incrementAndGet();
+                }
+              });
       executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
       executor.shutdown();
       stage.complete("ready");
+      assertTrue(cleanupStarted.await(5, TimeUnit.SECONDS));
+      assertTrue(cleanupIsVirtual.get());
+      assertFalse(completion.isDone(), "cleanup must finish before the result is published");
+      cleanup.complete(null);
       assertThrows(RejectedExecutionException.class, () -> await(completion));
+      assertEquals(1, cleanups.get());
+      assertFalse(continued.get());
+
+      // An initial rejection must not start the task on the cleanup thread.
+      final var rejected = Continuations.supplier(executor, () -> fail("task must not start"));
+      assertThrows(RejectedExecutionException.class, rejected::get);
+    } finally {
+      stage.complete("release waiter");
+      cleanup.complete(null);
     }
   }
 

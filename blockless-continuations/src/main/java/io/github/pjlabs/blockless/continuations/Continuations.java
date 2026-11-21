@@ -8,6 +8,7 @@ import io.github.pjlabs.blockless.SupplierWaitSupport;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import jdk.internal.vm.Continuation;
@@ -23,11 +24,15 @@ public final class Continuations {
   /**
    * Starts a value-producing continuation immediately and returns a supplier of its cached outcome.
    * Pending reads inside another continuation suspend that caller; virtual-thread reads park, and
-   * ordinary platform-thread reads outside a continuation wait. Task failures are thrown at get().
+   * pending reads on ordinary platform threads outside a continuation throw IllegalStateException.
+   * Task failures are thrown at get().
    *
    * <p>Initial execution and subsequent resumes use {@code executor}; use a queuing executor to
    * release the submitting thread. Each resume attaches the context captured here and restores the
    * executor thread's previous context. Tasks without a value can return {@code null}.
+   *
+   * <p>If a resume is rejected, the rejection is thrown at the suspended read on a fallback virtual
+   * thread. The result becomes readable after the task exits, including its finally blocks.
    */
   public static <T> AsyncSupplier<T> supplier(
       Executor executor, Supplier<T> task, ContextPropagator... propagators) {
@@ -42,7 +47,30 @@ public final class Continuations {
     }
     final var runner = new Runner<T>(executor, task, propagators);
     runner.signal();
-    return (AsyncSupplier<T>) Blockless.supplier(runner.completion);
+    return new ContinuationResult<>((AsyncSupplier<T>) Blockless.supplier(runner.completion));
+  }
+
+  private record ContinuationResult<T>(AsyncSupplier<T> result) implements AsyncSupplier<T> {
+    @Override
+    public T get() {
+      if (!result.isDone()
+          && !Thread.currentThread().isVirtual()
+          && Continuation.getCurrentContinuation(Runner.SCOPE) == null) {
+        throw new IllegalStateException(
+            "Pending continuation results require a continuation or virtual-thread caller");
+      }
+      return result.get();
+    }
+
+    @Override
+    public boolean isDone() {
+      return result.isDone();
+    }
+
+    @Override
+    public void onComplete(Runnable action) {
+      result.onComplete(action);
+    }
   }
 
   private static final class Runner<T> {
@@ -55,6 +83,7 @@ public final class Continuations {
     // Confined to the serialized drain; a suspended continuation is resumed exactly once.
     private final Continuation continuation;
     private AsyncSupplier<?> pending;
+    private RejectedExecutionException rejection;
     private T value;
 
     private Runner(Executor executor, Supplier<T> task, ContextPropagator[] propagators) {
@@ -82,7 +111,18 @@ public final class Continuations {
       try {
         executor.execute(drain);
       } catch (Throwable failure) {
-        completion.completeExceptionally(failure);
+        if (pending == null) {
+          // Initial submission failed: the task has not acquired any resources yet.
+          completion.completeExceptionally(failure);
+        } else {
+          rejection =
+              failure instanceof RejectedExecutionException rejected
+                  ? rejected
+                  : new RejectedExecutionException("Cannot resume continuation", failure);
+          // Throw at the suspended read so Java unwinds the stack before publishing the outcome.
+          // A virtual thread also lets finally blocks wait for asynchronous cleanup.
+          Thread.ofVirtual().inheritInheritableThreadLocals(false).start(drain);
+        }
       }
     }
 
@@ -107,6 +147,9 @@ public final class Continuations {
       pending = supplier;
       if (!Continuation.yield(SCOPE)) {
         throw new IllegalStateException("Native continuation could not suspend");
+      }
+      if (rejection != null) {
+        throw rejection;
       }
     }
   }
