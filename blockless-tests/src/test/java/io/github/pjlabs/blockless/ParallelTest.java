@@ -16,7 +16,9 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.Semaphore;
@@ -333,6 +335,48 @@ class ParallelTest {
       assertThrows(
           IllegalArgumentException.class,
           () -> Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(0));
+    }
+
+    // The next two tests pin the scope: each call gets its own window, and async() ignores the
+    // limit. For a limit across calls, use withSharedLimit. Changing either must be deliberate.
+    @Test
+    void appliesToEachCallSeparately() throws Exception {
+      final var bounded = parallel.withMaxConcurrency(2);
+      // Passes only if both calls run their 2 tasks at the same time, 4 in total.
+      final var allRunning = new CyclicBarrier(4);
+      final var first =
+          new FutureTask<>(() -> bounded.map(List.of(1, 2), i -> awaitAll(allRunning, i)));
+      final var second =
+          new FutureTask<>(() -> bounded.map(List.of(3, 4), i -> awaitAll(allRunning, i)));
+      Thread.startVirtualThread(first);
+      Thread.startVirtualThread(second);
+      assertEquals(List.of(1, 2), first.get(5, TimeUnit.SECONDS));
+      assertEquals(List.of(3, 4), second.get(5, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void doesNotLimitAsync() {
+      final var bounded = parallel.withMaxConcurrency(1);
+      // Passes only if all 3 async tasks run at the same time.
+      final var allRunning = new CyclicBarrier(3);
+      final var results =
+          IntStream.range(0, 3)
+              .mapToObj(i -> bounded.async(() -> awaitAll(allRunning, i)))
+              .toList();
+      assertEquals(List.of(0, 1, 2), results.stream().map(Supplier::get).toList());
+    }
+
+    /** Returns {@code item} once every party has reached {@code barrier}; fails after 3 s. */
+    private <T> T awaitAll(CyclicBarrier barrier, T item) {
+      try {
+        barrier.await(3, TimeUnit.SECONDS);
+        return item;
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException(e);
+      } catch (BrokenBarrierException | TimeoutException e) {
+        throw new IllegalStateException("tasks did not all run at the same time", e);
+      }
     }
   }
 
