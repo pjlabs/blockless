@@ -1,6 +1,7 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import io.github.pjlabs.blockless.continuations.Continuations;
 import java.util.List;
@@ -20,7 +21,8 @@ class SupplierCompletionTest {
         List.of(
             Blockless.supplier(stage),
             Blockless.supplier(stage::join),
-            Parallel.create().async(stage::join));
+            Parallel.create().async(stage::join),
+            Continuations.supplier(Runnable::run, () -> Blockless.get(stage)));
     final var results =
         sources.stream()
             .map(
@@ -47,7 +49,8 @@ class SupplierCompletionTest {
   @Test
   void completionDuringRegistrationTrampolinesWithoutRecursiveResumption() throws Exception {
     final var reads = new AtomicInteger();
-    Continuations.run(
+    final var result =
+        Continuations.supplier(
             Runnable::run,
             () -> {
               for (int i = 0; i < 20_000; i++) {
@@ -65,9 +68,9 @@ class SupplierCompletionTest {
                 final var supplier = new ResultSupplier<>(reads::incrementAndGet, ready);
                 assertEquals(i + 1, supplier.get());
               }
-            })
-        .toCompletableFuture()
-        .get(5, TimeUnit.SECONDS);
+              return null;
+            });
+    assertNull(result.get());
     assertEquals(20_000, reads.get());
   }
 }

@@ -2,8 +2,8 @@
 
 Runs synchronous-looking code on a platform executor and releases its worker
 while a Blockless supplier is pending. This requires an explicit
-`Continuations.run` or `Continuations.supplier` boundary; ordinary platform-thread
-supplier reads outside it still wait.
+`Continuations.supplier` boundary; ordinary platform-thread supplier reads
+outside it still wait.
 Uses an internal OpenJDK API. No third-party runtime dependencies, annotations,
 or agent.
 
@@ -23,28 +23,26 @@ var user = Continuations.supplier(platformExecutor, () -> {
     var permissions = Blockless.supplier(() -> loadPermissions(id));
     return buildUser(details.get(), permissions.get());
 });
-
-var completion = Continuations.run(platformExecutor, () -> process(user.get()));
 ```
 
-`supplier` starts eagerly and returns a `Supplier<T>` with a cached value or
-failure. Its pending `get()` suspends callers inside another continuation, parks
-virtual-thread callers, and waits on ordinary platform-thread callers outside a
-continuation. `run` remains available for tasks without a return value.
+`supplier` starts eagerly and returns an `AsyncSupplier<T>` (a `Supplier<T>`)
+with a cached value or failure. Its pending `get()` suspends callers inside another
+continuation, parks virtual-thread callers, and waits on ordinary platform-thread
+callers outside a continuation. Tasks without a value can return `null`.
+An optional `onComplete` callback runs once the outcome is readable, including on failure.
 
 Use an application-owned executor that queues work. The caller returns
-immediately; do not join `completion` on it. Pending reads suspend the stack
-and locals. Completion schedules a resume on the same executor, possibly on a
-different thread. Exceptions are thrown at the read; unhandled task failures
-complete the returned stage exceptionally.
+immediately; reading the result on that caller can still wait. Suspension preserves
+the stack and locals. Completion schedules a resume on the same executor, possibly
+on a different thread. Task failures are thrown at `get()`.
 
 - Supports `Blockless.get`, `Blockless.supplier(...).get()`, and `Parallel.async(...).get()`.
   Direct I/O and other blocking calls in the task body still block.
-- Optional context propagators passed to either method attach the submission snapshot
+- Optional context propagators attach the submission snapshot
   on each resume and restore the executor thread afterward.
 - Do not hold monitors, native frames, locks, or thread-affine resources across
   suspension. JVM pinning can prevent yielding.
-- Cancellation is unsupported. If the executor rejects a resume, the stage fails
+- Cancellation is unsupported. If the executor rejects a resume, the supplier fails
   and suspended cleanup cannot run.
 
 Run `mvn clean verify`. Maven configures the internal API exports for compilation,

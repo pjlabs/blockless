@@ -7,7 +7,6 @@ import io.github.pjlabs.blockless.ContextPropagator;
 import io.github.pjlabs.blockless.SupplierWaitSupport;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
@@ -22,37 +21,16 @@ public final class Continuations {
   private Continuations() {}
 
   /**
-   * Submits a task and returns without waiting for its results. Initial execution and subsequent
-   * resumes use {@code executor}; use a queuing executor to release the submitting thread. Each
-   * resume attaches the context captured here and restores the executor thread's previous context.
-   * The returned stage reports task completion or failure; it does not expose cancellation.
-   */
-  public static CompletionStage<Void> run(
-      Executor executor, Runnable task, ContextPropagator... propagators) {
-    Objects.requireNonNull(task, "task");
-    return Continuations.<Void>start(
-            executor,
-            () -> {
-              task.run();
-              return null;
-            },
-            propagators)
-        .minimalCompletionStage();
-  }
-
-  /**
    * Starts a value-producing continuation immediately and returns a supplier of its cached outcome.
    * Pending reads inside another continuation suspend that caller; virtual-thread reads park, and
    * ordinary platform-thread reads outside a continuation wait. Task failures are thrown at get().
-   * Execution and context propagation follow the same rules as {@link #run}.
+   *
+   * <p>Initial execution and subsequent resumes use {@code executor}; use a queuing executor to
+   * release the submitting thread. Each resume attaches the context captured here and restores the
+   * executor thread's previous context. Tasks without a value can return {@code null}.
    */
-  public static <T> Supplier<T> supplier(
+  public static <T> AsyncSupplier<T> supplier(
       Executor executor, Supplier<T> task, ContextPropagator... propagators) {
-    return Blockless.supplier(start(executor, task, propagators));
-  }
-
-  private static <T> CompletableFuture<T> start(
-      Executor executor, Supplier<T> task, ContextPropagator[] propagators) {
     Objects.requireNonNull(executor, "executor");
     Objects.requireNonNull(task, "task");
     final var apiModule = Continuations.class.getModule();
@@ -64,11 +42,11 @@ public final class Continuations {
     }
     final var runner = new Runner<T>(executor, task, propagators);
     runner.signal();
-    return runner.completion;
+    return (AsyncSupplier<T>) Blockless.supplier(runner.completion);
   }
 
   private static final class Runner<T> {
-    // Initialize native types only after run() has checked the required JVM export.
+    // Initialize native types only after supplier() has checked the required JVM export.
     private static final ContinuationScope SCOPE = new ContinuationScope("blockless");
     private final Executor executor;
     private final CompletableFuture<T> completion = new CompletableFuture<>();
