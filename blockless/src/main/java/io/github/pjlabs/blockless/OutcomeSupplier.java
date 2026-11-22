@@ -3,10 +3,9 @@ package io.github.pjlabs.blockless;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
-import java.util.function.Supplier;
 
 /** Stores a single outcome and waits for its publication before supplying it. */
-final class OutcomeSupplier<T> implements Supplier<T> {
+final class OutcomeSupplier<T> implements AsyncSupplier<T> {
 
   private final CompletableFuture<T> result = new CompletableFuture<>();
   private final CountDownLatch latch = new CountDownLatch(1);
@@ -42,6 +41,20 @@ final class OutcomeSupplier<T> implements Supplier<T> {
       case FAILED -> throw wrapIfChecked(result.exceptionNow());
       case CANCELLED, RUNNING -> throw new IllegalStateException("Result not completed");
     };
+  }
+
+  @Override
+  public boolean isDone() {
+    return result.isDone();
+  }
+
+  @Override
+  public void onComplete(Runnable action) {
+    result.handle(
+        (value, failure) -> {
+          action.run();
+          return null;
+        });
   }
 
   private static RuntimeException wrapIfChecked(Throwable t) {

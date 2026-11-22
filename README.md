@@ -14,6 +14,9 @@ A tiny Java 21 library for virtual thread concurrency. Two things:
 So you can wait on async results without calling their blocking methods, and your context tags
 along for the ride.
 
+The experimental [continuation module](blockless-continuations/README.md) dispatches
+blocking work on virtual threads while releasing its dispatch executor's workers.
+
 Zero dependencies in core. Pluggable context propagation for MDC, gRPC, and OpenTelemetry.
 
 ## Quick start
@@ -35,7 +38,7 @@ could block or pin.
 `Blockless.get()` registers a completion callback and waits on a `CountDownLatch`
 through a shared `OutcomeSupplier`. It does not call the future's blocking methods
 or create an extra waiting thread. Virtual-thread callers park on the latch;
-platform-thread callers block until the outcome is available.
+ordinary platform-thread callers block until the outcome is available.
 
 ```java
 // Wait inside CompletableFuture. May run other pending callbacks on the caller thread.
@@ -44,6 +47,10 @@ String result = someFuture.join();
 // Wait on a latch released by a completion callback. The wait itself runs no callbacks.
 String result = Blockless.get(someFuture);
 ```
+
+Use virtual threads for an ordinary synchronous call chain. Pending supplier reads
+park the virtual caller and resume when ready. Ordinary platform callers wait for
+the value on their calling thread, including with the continuation module.
 
 Also works with callables — runs them on a virtual thread and blocks for the result:
 
@@ -180,6 +187,7 @@ your service already has. No version conflicts.
 | `blockless-context-grpc` | gRPC context propagation |
 | `blockless-context-opentelemetry` | OpenTelemetry context propagation |
 | `blockless-tests` | Integration tests |
+| `blockless-continuations` | Experimental virtual-thread suppliers with completion notifications |
 
 ## Requirements
 
