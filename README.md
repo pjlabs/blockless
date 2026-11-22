@@ -14,8 +14,8 @@ A tiny Java 21 library for virtual thread concurrency. Two things:
 So you can wait on async results without calling their blocking methods, and your context tags
 along for the ride.
 
-To release a platform-thread caller while retaining synchronous-looking code, use the
-experimental [continuation module](blockless-continuations/README.md).
+The experimental [continuation module](blockless-continuations/README.md) dispatches
+blocking work on virtual threads while releasing its dispatch executor's workers.
 
 Zero dependencies in core. Pluggable context propagation for MDC, gRPC, and OpenTelemetry.
 
@@ -48,9 +48,9 @@ String result = someFuture.join();
 String result = Blockless.get(someFuture);
 ```
 
-Use virtual threads for an ordinary synchronous call chain. If the call chain must
-run on a platform executor, the optional continuation module saves its execution
-state at unfinished supplier reads and schedules it again when the result is ready.
+Use virtual threads for an ordinary synchronous call chain. Pending supplier reads
+park the virtual caller and resume when ready. Ordinary platform callers wait for
+the value on their calling thread, including with the continuation module.
 
 Also works with callables — runs them on a virtual thread and blocks for the result:
 

@@ -10,7 +10,7 @@
     </parent>
     <artifactId>blockless-continuations</artifactId>
     <name>blockless continuations (experimental)</name>
-    <description>Experimental native JVM continuations for platform-thread supplier reads.</description>
+    <description>Experimental supplier dispatch with native JVM continuations.</description>
     <properties>
         <!-- javac requires source/target, rather than release, when exporting JDK internals. -->
         <maven.compiler.source>21</maven.compiler.source>

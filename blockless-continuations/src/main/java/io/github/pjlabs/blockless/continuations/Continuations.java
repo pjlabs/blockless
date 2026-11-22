@@ -54,8 +54,9 @@ public final class Continuations {
   /**
    * Dispatches work onto a virtual thread and returns a supplier of its cached outcome. A native
    * continuation releases the executor worker while the body runs, including ordinary blocking I/O.
-   * Virtual-thread callers park on pending reads. Pending reads on platform threads throw
-   * IllegalStateException. Task failures are thrown at get().
+   * Pending reads wait for completion: virtual-thread callers park and resume when ready, while
+   * ordinary platform-thread callers wait on their calling thread. Task failures are thrown at
+   * get().
    *
    * <p>Use a queuing executor for dispatch and completion. The body always runs on a virtual
    * thread; configured context is captured at submission and attached for the body's lifetime.
@@ -85,10 +86,6 @@ public final class Continuations {
   private record ContinuationResult<T>(AsyncSupplier<T> result) implements AsyncSupplier<T> {
     @Override
     public T get() {
-      if (!result.isDone() && !Thread.currentThread().isVirtual()) {
-        throw new IllegalStateException(
-            "Pending continuation results require a virtual-thread caller");
-      }
       return result.get();
     }
 

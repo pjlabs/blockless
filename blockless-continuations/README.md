@@ -2,8 +2,8 @@
 
 `Continuations.supplier` runs its callable on a virtual thread, so ordinary
 blocking calls can use virtual-thread parking. A native continuation releases
-the dispatch executor's worker until the body finishes. Pending result reads on ordinary
-platform threads throw `IllegalStateException` instead of waiting.
+the dispatch executor's worker until the body finishes. A pending `get()` waits
+for the actual value or task failure; pending status never causes an exception.
 Uses an internal OpenJDK API. No third-party runtime dependencies, annotations,
 or agent.
 
@@ -23,6 +23,7 @@ var user = Continuations.supplier(() -> {
     var permissions = loadPermissions(id);
     return buildUser(details, permissions);
 });
+var value = user.get();
 ```
 
 One supplier is enough for ordinary blocking code. These calls run sequentially
@@ -32,9 +33,11 @@ results when independent operations should run in parallel.
 `supplier` starts eagerly and returns an `AsyncSupplier<T>` (a `Supplier<T>`)
 with a cached value or failure. The callable supports checked exceptions and
 plain blocking code; no `Blockless.get` wrapper is required. Nested suppliers fork
-independent work, and their pending reads park the virtual-thread caller.
-Ordinary platform threads can read
-completed outcomes; pending reads throw to prevent executor starvation.
+independent work. Pending reads park virtual-thread callers; completion makes
+them runnable again. An ordinary platform caller waits on its calling thread.
+Freeing that caller's worker requires a virtual-thread task entry. In particular,
+do not wait on a platform worker if the chosen dispatch executor needs that same
+worker to start or complete the supplier.
 Tasks without a value can return `null`.
 An optional `onComplete` callback runs once the outcome is readable, including on failure.
 

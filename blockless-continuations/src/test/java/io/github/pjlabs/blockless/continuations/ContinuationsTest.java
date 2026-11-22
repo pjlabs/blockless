@@ -20,6 +20,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
@@ -40,7 +41,7 @@ class ContinuationsTest {
               return "hello";
             });
 
-    assertEquals("hello", awaitResult(greeting));
+    assertEquals("hello", greeting.get());
   }
 
   @Test
@@ -77,7 +78,7 @@ class ContinuationsTest {
       executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
       assertFalse(user.isDone());
       finishQueries.countDown();
-      assertEquals("Alice: admin", awaitResult(user));
+      assertEquals("Alice: admin", user.get());
     } finally {
       finishQueries.countDown();
     }
@@ -98,29 +99,40 @@ class ContinuationsTest {
       final var completion = Continuations.supplier(executor, value::get);
       executor.submit(() -> {}).get(5, TimeUnit.SECONDS);
       stage.complete("ready");
-      assertSame(failure, assertThrows(IllegalStateException.class, () -> awaitResult(completion)));
+      assertSame(failure, assertThrows(IllegalStateException.class, completion::get));
     } finally {
       stage.complete("release waiter");
     }
   }
 
-  @Test
-  void pendingResultReadsFailFastOnPlatformThreads() throws Exception {
-    try (final var executor = Executors.newSingleThreadExecutor()) {
-      final var caller =
-          executor.submit(
-              () -> {
-                // This worker must return before its queued supplier can start.
-                final var result = Continuations.supplier(executor, () -> 42);
-                assertThrows(IllegalStateException.class, result::get);
-                return result;
-              });
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void pendingGetReturnsTheValueOnEitherThreadType(boolean virtual) throws Exception {
+    final var finishBody = new CountDownLatch(1);
+    final var reading = new CountDownLatch(1);
+    final var factory = virtual ? Thread.ofVirtual().factory() : Thread.ofPlatform().factory();
+    try (final var callers = Executors.newThreadPerTaskExecutor(factory)) {
       try {
-        final var result = caller.get(5, TimeUnit.SECONDS);
-        assertEquals(42, awaitResult(result));
+        final var result =
+            Continuations.supplier(
+                () -> {
+                  finishBody.await();
+                  return 42;
+                });
+        final var caller =
+            callers.submit(
+                () -> {
+                  assertEquals(virtual, Thread.currentThread().isVirtual());
+                  reading.countDown();
+                  return result.get();
+                });
+        assertTrue(reading.await(5, TimeUnit.SECONDS));
+        assertThrows(TimeoutException.class, () -> caller.get(100, TimeUnit.MILLISECONDS));
+        finishBody.countDown();
+        assertEquals(42, caller.get(5, TimeUnit.SECONDS));
         assertEquals(42, result.get());
       } finally {
-        caller.cancel(true);
+        finishBody.countDown();
       }
     }
   }
@@ -198,7 +210,7 @@ class ContinuationsTest {
       assertFalse(completion.isDone());
       assertEquals(0, cleanups.get());
       stage.complete("ready");
-      assertEquals("ready", awaitResult(completion));
+      assertEquals("ready", completion.get());
       assertEquals("resume", completionThread.get(5, TimeUnit.SECONDS));
       assertEquals(1, entries.get());
       assertEquals(1, cleanups.get());
@@ -247,10 +259,8 @@ class ContinuationsTest {
       assertTrue(cleanupIsVirtual.get());
       assertFalse(completion.isDone(), "cleanup must finish before the result is published");
       cleanup.complete(null);
-      if (fails)
-        assertSame(
-            failure, assertThrows(IllegalStateException.class, () -> awaitResult(completion)));
-      else assertEquals("ready", awaitResult(completion));
+      if (fails) assertSame(failure, assertThrows(IllegalStateException.class, completion::get));
+      else assertEquals("ready", completion.get());
       assertEquals(1, cleanups.get());
       assertEquals("request", context.get());
     } finally {
@@ -343,7 +353,7 @@ class ContinuationsTest {
       for (int i = 0; i < suppliers.size(); i++) assertEquals(i, suppliers.get(i).get());
       assertEquals(1, maximumCallbackDepth.get());
       // The thread-local dispatch queue must not retain later work after draining.
-      assertEquals(42, awaitResult(Continuations.supplier(Runnable::run, () -> 42)));
+      assertEquals(42, Continuations.supplier(Runnable::run, () -> 42).get());
     } finally {
       finishBodies.countDown();
     }
@@ -357,14 +367,6 @@ class ContinuationsTest {
             () -> Continuations.supplier(() -> fail("task must not run")));
     assertTrue(
         failure.getMessage().contains("--add-exports=java.base/jdk.internal.vm=ALL-UNNAMED"));
-  }
-
-  // The JUnit thread waits for readiness here; application code can call get() on a virtual thread.
-  private static <T> T awaitResult(AsyncSupplier<T> supplier) throws Exception {
-    final var ready = new CompletableFuture<Void>();
-    supplier.onComplete(() -> ready.complete(null));
-    ready.get(5, TimeUnit.SECONDS);
-    return supplier.get();
   }
 
   private record ThreadContext(ThreadLocal<String> context) implements ContextPropagator {
