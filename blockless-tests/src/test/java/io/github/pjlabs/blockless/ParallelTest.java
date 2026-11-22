@@ -50,6 +50,30 @@ class ParallelTest {
   }
 
   @Test
+  void finishedAsyncTaskGivesOutcomeToInterruptedCaller() {
+    for (final var p : List.of(parallel, parallel.withTimeout(Duration.ofSeconds(30)))) {
+      final var original = new IllegalStateException("broken");
+      final var succeeded = p.async(() -> "done");
+      final var failed =
+          p.<String>async(
+              () -> {
+                throw original;
+              });
+      assertEquals("done", succeeded.get());
+      assertSame(original, assertThrows(IllegalStateException.class, failed::get));
+
+      try {
+        Thread.currentThread().interrupt();
+        assertEquals("done", succeeded.get());
+        assertSame(original, assertThrows(IllegalStateException.class, failed::get));
+        assertTrue(Thread.currentThread().isInterrupted());
+      } finally {
+        Thread.interrupted();
+      }
+    }
+  }
+
+  @Test
   void preservesOriginalError() {
     for (final var p : List.of(parallel, parallel.withTimeout(Duration.ofSeconds(30)))) {
       final var original = new AssertionError("task failed");
