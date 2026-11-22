@@ -12,9 +12,15 @@ public final class Slf4jMdcContextPropagator implements ContextPropagator {
     return MDC.getCopyOfContextMap();
   }
 
+  /** A {@code null} capture means an empty MDC at capture, so the task runs with an empty MDC. */
   @Override
   public Object attach(Object captured) {
-    if (captured == null || !(captured instanceof Map<?, ?> raw)) {
+    if (captured == null) {
+      final var previous = MDC.getCopyOfContextMap();
+      MDC.clear();
+      return previous;
+    }
+    if (!(captured instanceof Map<?, ?> raw)) {
       return null;
     }
     @SuppressWarnings("unchecked")
