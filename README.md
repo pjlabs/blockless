@@ -11,14 +11,15 @@ A tiny Java 21 library for virtual thread concurrency. Two things:
 1. **`Blockless.get()`** — wait for async results safely, without entering the future's internals
 2. **`Parallel`** — fan out work on virtual threads, collect results, keep your trace context
 
-So your platform threads stay free and your context tags along for the ride.
+So you can wait on async results without calling their blocking methods, and your context tags
+along for the ride.
 
 Zero dependencies in core. Pluggable context propagation for MDC, gRPC, and OpenTelemetry.
 
 ## Quick start
 
 ```java
-// Wait for a CompletionStage without blocking platform threads
+// Wait for a CompletionStage without calling its blocking methods
 var result = Blockless.get(CompletableFuture.supplyAsync(() -> "hello"));
 
 // Run a Callable on a virtual thread and get the result
@@ -31,19 +32,18 @@ var answer = Blockless.get(() -> expensiveComputation());
 If that implementation uses `synchronized` or you're on a platform thread, you
 could block or pin.
 
-`Blockless.get()` never enters the `CompletionStage` internals. It waits on a
-virtual thread via a `CountDownLatch` — your thread is never at risk, regardless
-of what the stage does internally.
+`Blockless.get()` registers a completion callback and waits on a `CountDownLatch`
+through a shared `OutcomeSupplier`. It does not call the future's blocking methods
+or create an extra waiting thread. Virtual-thread callers park on the latch;
+platform-thread callers block until the outcome is available.
 
 ```java
-// Parks inside CompletableFuture internals — you're at the mercy of the implementation.
+// Wait inside CompletableFuture. May run other pending callbacks on the caller thread.
 String result = someFuture.join();
 
-// Waits on a virtual thread + latch. Your thread never touches the future. 🐉
+// Wait on a latch released by a completion callback. The wait itself runs no callbacks.
 String result = Blockless.get(someFuture);
 ```
-
-**Defensive coding:** `Blockless.get()` is safe whether your calling thread is a virtual thread or a platform thread. If a refactor, config change, or library upgrade silently changes what thread your code runs on, `.join()` could start blocking platform threads with no warning. `Blockless.get()` stays safe regardless — you don't have to know or care what thread you're on.
 
 Also works with callables — runs them on a virtual thread and blocks for the result:
 
@@ -94,7 +94,7 @@ Supplier<String> data = parallel.async(() -> fetchData());
 // Build a map in parallel
 Map<String, Profile> profiles = parallel.asMap(userIds, id -> loadProfile(id));
 
-// Limit each call to 10 concurrent tasks (the rest wait for a free slot)
+// At most 10 active tasks per map()/toEither() call (sliding window); async() is unaffected
 var boundedParallel = parallel.withMaxConcurrency(10);
 List<String> names = boundedParallel.map(userIds, id -> fetchName(id));
 
@@ -114,17 +114,22 @@ var safeParallel = parallel.withMaxConcurrency(10).withTimeout(Duration.ofSecond
 List<Either<String, Throwable>> results = parallel.toEither(ids, id -> riskyFetch(id));
 ```
 
-`withMaxConcurrency` limits each call separately: two simultaneous requests can run 2 × N tasks.
-`withSharedLimit` limits every call, thread and `Parallel` instance that uses the same `Semaphore`,
-including `async()`. Use it to protect an external service, and keep the semaphore in a field so it
-is shared. Combine both for large batches. Don't wait for tasks that use the same semaphore from
-inside one of its tasks: if every permit is held by a waiting task, they deadlock.
+`withMaxConcurrency(n)` is a per-call limit for `map()`, `toEither()`, `asMap()` and
+`toEitherMap()`: concurrent calls each get their own window, so two simultaneous requests can run
+2 × N tasks, and `async()` ignores it. `withSharedLimit` limits every call, thread and `Parallel`
+instance that uses the same `Semaphore`, including `async()`. Use it to protect an external service,
+and keep the semaphore in a field so it is shared. Combine both for large batches. Don't wait for
+tasks that use the same semaphore from inside one of its tasks: if every permit is held by a waiting
+task, they deadlock.
 
-Timeouts apply to each task after it is launched. Time queued for a concurrency slot or a shared-limit
-permit does not count, and the task timeout is not a deadline for the batch. It also does not bound
-the wait for a permit: if every permit is held by tasks that ignore interruption, callers block until
-one of them exits. `map()` throws a wrapped `TimeoutException`,
-while `toEither()` collects it as `Either.fail()` and continues processing the other items.
+Each task's worker is started before its timeout is registered. The timeout budget runs from
+registration; time queued for a concurrency slot and any delay before registration do not count.
+With `withSharedLimit`, the timeout is registered once the task holds its permit, so time spent
+waiting for a permit does not count either. The timeout does not bound that wait: if every permit
+is held by tasks that ignore interruption, callers block until one of them returns. This is a
+per-task timeout, not a deadline from submission or for the whole batch. `map()` throws a wrapped
+`TimeoutException`, while `toEither()` collects it as `Either.fail()` and continues processing the
+other items.
 
 On failure, `map()` interrupts the other active workers without waiting for their cleanup. A task
 that ignores interruption may keep running after its result has timed out or the batch has returned.

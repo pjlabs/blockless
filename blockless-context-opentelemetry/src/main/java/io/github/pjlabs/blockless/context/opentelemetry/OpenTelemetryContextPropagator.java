@@ -13,6 +13,7 @@ public final class OpenTelemetryContextPropagator implements ContextPropagator {
   }
 
   @Override
+  @SuppressWarnings("MustBeClosedChecker") // restore closes the scope returned as an opaque token.
   public Object attach(Object captured) {
     if (captured == null || !(captured instanceof Context context)) {
       return null;

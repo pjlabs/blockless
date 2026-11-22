@@ -17,6 +17,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
@@ -613,44 +615,140 @@ class ParallelTest {
   class Timeout {
 
     @Test
-    void interruptingAsyncWaiterInterruptsWorker() throws Exception {
-      final var started = new CountDownLatch(1);
-      final var interrupted = new CountDownLatch(1);
-      final var release = new CountDownLatch(1);
-      final var finished = new CountDownLatch(1);
-      final var supplier =
-          parallel
-              .withTimeout(Duration.ofSeconds(30))
-              .async(
-                  () -> {
-                    started.countDown();
-                    try {
-                      release.await();
-                      return "done";
-                    } catch (InterruptedException e) {
-                      interrupted.countDown();
-                      Thread.currentThread().interrupt();
-                      throw new RuntimeException(e);
-                    } finally {
-                      finished.countDown();
-                    }
-                  });
-      final var waiting = new FutureTask<>(supplier::get);
-      final var caller = Thread.startVirtualThread(waiting);
-      try {
-        assertTrue(started.await(3, TimeUnit.SECONDS));
-        caller.interrupt();
-        final var failure =
-            assertThrows(ExecutionException.class, () -> waiting.get(3, TimeUnit.SECONDS));
-        assertInstanceOf(InterruptedException.class, failure.getCause().getCause());
-        assertTrue(interrupted.await(3, TimeUnit.SECONDS));
-      } finally {
-        release.countDown();
-        caller.interrupt();
-        caller.join(3000);
-        assertFalse(caller.isAlive());
-        assertTrue(finished.await(3, TimeUnit.SECONDS));
+    void interruptingAsyncWaiterLeavesWorkerAvailableToOtherCallers() throws Exception {
+      for (final var executor : List.of(parallel, parallel.withTimeout(Duration.ofSeconds(30)))) {
+        final var started = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var finished = new CountDownLatch(1);
+        final var workerInterrupted = new AtomicBoolean();
+        final var callerInterrupted = new AtomicBoolean();
+        final var supplier =
+            executor.async(
+                () -> {
+                  started.countDown();
+                  try {
+                    release.await();
+                    return "done";
+                  } catch (InterruptedException e) {
+                    workerInterrupted.set(true);
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(e);
+                  } finally {
+                    finished.countDown();
+                  }
+                });
+        final var waiting =
+            new FutureTask<>(
+                () -> {
+                  try {
+                    return supplier.get();
+                  } finally {
+                    callerInterrupted.set(Thread.currentThread().isInterrupted());
+                  }
+                });
+        final var caller = Thread.startVirtualThread(waiting);
+        final var otherWaiting = new FutureTask<>(supplier::get);
+        final var otherCaller = Thread.startVirtualThread(otherWaiting);
+        try {
+          assertTrue(started.await(3, TimeUnit.SECONDS));
+          caller.interrupt();
+
+          final var failure =
+              assertThrows(ExecutionException.class, () -> waiting.get(3, TimeUnit.SECONDS));
+          assertInstanceOf(InterruptedException.class, failure.getCause().getCause());
+          assertTrue(callerInterrupted.get());
+          assertEquals(1, finished.getCount());
+
+          release.countDown();
+          assertEquals("done", otherWaiting.get(3, TimeUnit.SECONDS));
+          assertEquals("done", supplier.get());
+          assertFalse(workerInterrupted.get());
+        } finally {
+          release.countDown();
+          caller.join(3000);
+          otherCaller.join(3000);
+          assertFalse(caller.isAlive());
+          assertFalse(otherCaller.isAlive());
+          assertTrue(finished.await(3, TimeUnit.SECONDS));
+        }
       }
+    }
+
+    @Test
+    void asyncPreservesTaskCompletionException() {
+      final var original = new CompletionException(new IllegalArgumentException("task failed"));
+      for (final var executor : List.of(parallel, parallel.withTimeout(Duration.ofSeconds(30)))) {
+        final var supplier =
+            executor.async(
+                () -> {
+                  throw original;
+                });
+
+        assertSame(original, assertThrows(CompletionException.class, supplier::get));
+        assertSame(original, assertThrows(CompletionException.class, supplier::get));
+      }
+    }
+
+    @Test
+    void asyncPreservesTaskCancellationException() {
+      final var original = new CancellationException("cancelled by task");
+      for (final var executor : List.of(parallel, parallel.withTimeout(Duration.ofSeconds(30)))) {
+        final var supplier =
+            executor.async(
+                () -> {
+                  throw original;
+                });
+
+        assertSame(original, assertThrows(CancellationException.class, supplier::get));
+        assertSame(original, assertThrows(CancellationException.class, supplier::get));
+      }
+    }
+
+    @Test
+    void asyncCompletesWhenTaskExceptionToStringThrows() {
+      final var original =
+          new IllegalStateException() {
+            @Override
+            public String toString() {
+              throw new UnsupportedOperationException("toString");
+            }
+          };
+      final var supplier =
+          parallel.async(
+              () -> {
+                throw original;
+              });
+
+      assertTimeoutPreemptively(
+          Duration.ofSeconds(3),
+          () -> assertSame(original, assertThrows(IllegalStateException.class, supplier::get)));
+    }
+
+    @Test
+    void timeoutOverflowFailsBeforeTaskStarts() throws InterruptedException {
+      final var ran = new AtomicBoolean();
+      final var overflowing = parallel.withTimeout(Duration.ofSeconds(Long.MAX_VALUE));
+
+      assertThrows(
+          ArithmeticException.class,
+          () ->
+              overflowing.async(
+                  () -> {
+                    ran.set(true);
+                    return "ran";
+                  }));
+      assertThrows(
+          ArithmeticException.class,
+          () ->
+              overflowing.map(
+                  List.of(1),
+                  item -> {
+                    ran.set(true);
+                    return item;
+                  }));
+
+      Thread.sleep(200);
+      assertFalse(ran.get());
     }
 
     @Test
@@ -1175,29 +1273,33 @@ class ParallelTest {
     void cancelledTaskWaitingForPermitNeverRuns() throws Exception {
       final var limit = new Semaphore(1);
       limit.acquire(); // occupy the only permit
-      final var ran = new AtomicBoolean();
-      final var supplier =
-          parallel
-              .withSharedLimit(limit)
-              .async(
-                  () -> {
-                    ran.set(true);
-                    return "ran";
-                  });
-      final var waiting = new FutureTask<>(supplier::get);
+      final var started = new AtomicInteger();
+      final var waiting =
+          new FutureTask<>(
+              () ->
+                  parallel
+                      .withSharedLimit(limit)
+                      .map(
+                          List.of(0, 1, 2),
+                          i -> {
+                            started.incrementAndGet();
+                            return i;
+                          }));
       final var caller = Thread.startVirtualThread(waiting);
 
-      awaitCondition(limit::hasQueuedThreads);
+      // Interrupting the map() caller cancels its tasks, which are all waiting for the permit.
+      // An interrupted async() waiter does not cancel its task, so map() is the way to cancel.
+      awaitCondition(() -> limit.getQueueLength() == 3);
       caller.interrupt();
       final var failure =
           assertThrows(ExecutionException.class, () -> waiting.get(3, TimeUnit.SECONDS));
       assertInstanceOf(InterruptedException.class, failure.getCause().getCause());
 
-      // The cancelled worker must stop waiting, not hold its place until a permit frees up.
+      // The cancelled workers must stop waiting, not hold their place until a permit frees up.
       awaitCondition(() -> !limit.hasQueuedThreads());
       limit.release();
       Thread.sleep(100);
-      assertFalse(ran.get(), "a task cancelled while waiting for its permit must not run");
+      assertEquals(0, started.get(), "tasks cancelled while waiting for a permit must not run");
       assertEquals(1, limit.availablePermits());
     }
 

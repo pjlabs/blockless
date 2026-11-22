@@ -10,8 +10,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
@@ -126,10 +126,11 @@ public final class Parallel {
    * #map} and {@link #async} wrap it in {@link RuntimeException}; {@link #toEither} collects it as
    * a failed {@link Either}.
    *
-   * <p>The timeout starts when each task is launched; time queued for a concurrency slot does not
-   * count. With {@link #withSharedLimit(Semaphore)}, it starts once the task holds its permit, so
-   * time spent waiting for a permit does not count either. This is a per-task timeout, not a
-   * deadline for the batch.
+   * <p>The worker thread is started before its timeout is registered. The configured duration is
+   * measured from registration, so time queued for a concurrency slot and any delay before timeout
+   * registration do not count. With {@link #withSharedLimit(Semaphore)}, the timeout is registered
+   * once the task holds its permit, so time spent waiting for a permit does not count either. This
+   * is a per-task timeout, not a deadline from submission or for the batch.
    *
    * <p>A timeout settles the task's result and interrupts its worker without waiting for cleanup.
    * Code that ignores interruption may keep running after its result has timed out. Callers remain
@@ -321,15 +322,14 @@ public final class Parallel {
       try {
         latch.await();
       } catch (InterruptedException e) {
-        cancel();
+        // Interruption ends only this caller's wait; other callers still share the outcome.
         Thread.currentThread().interrupt();
         throw new RuntimeException(e);
       }
       return switch (result.state()) {
         case SUCCESS -> result.resultNow();
         case FAILED -> throw wrapIfNeeded(result.exceptionNow());
-        case CANCELLED -> throw new CancellationException();
-        case RUNNING -> throw new IllegalStateException("Result not completed");
+        case CANCELLED, RUNNING -> throw new IllegalStateException("Result not completed");
       };
     }
   }
@@ -349,6 +349,8 @@ public final class Parallel {
 
   private <T> VirtualTask<T> startTask(
       Supplier<T> task, BiConsumer<T, Throwable> onResult, Runnable onWorkerExit) {
+    // Convert before starting the worker: an overflow here must not leave untracked work running.
+    final var timeoutNanos = timeout == null ? 0 : timeout.toNanos();
     final var result = new CompletableFuture<T>();
     final var latch = new CountDownLatch(1);
     final var callable = CallableContext.<T>wrap(task::get, propagators);
@@ -357,10 +359,12 @@ public final class Parallel {
             .unstarted(
                 () -> {
                   try {
-                    final var value = callWithPermit(callable, result);
+                    final var value = callWithPermit(callable, result, timeoutNanos);
                     result.complete(value);
                   } catch (Throwable failure) {
-                    result.completeExceptionally(failure);
+                    // Keep task exceptions intact: exceptionNow unwraps one CompletionException,
+                    // and an unwrapped CancellationException would mark the result as cancelled.
+                    result.completeExceptionally(new CompletionException(null, failure));
                   } finally {
                     onWorkerExit.run();
                   }
@@ -372,7 +376,9 @@ public final class Parallel {
             if (timeout != null && failure instanceof TimeoutException) {
               worker.interrupt();
             }
-            onResult.accept(value, failure);
+            onResult.accept(
+                value,
+                failure instanceof CompletionException wrapped ? wrapped.getCause() : failure);
           } finally {
             latch.countDown();
           }
@@ -380,14 +386,15 @@ public final class Parallel {
 
     worker.start();
     if (sharedLimit == null) {
-      startTimeout(result);
+      startTimeout(result, timeoutNanos);
     }
     return new VirtualTask<>(worker, result, latch);
   }
 
   // Without a shared limit, just calls the task. With one, holds a permit while the task runs. A
   // timed-out task keeps its permit until it returns.
-  private <T> T callWithPermit(Callable<T> callable, CompletableFuture<T> result) throws Exception {
+  private <T> T callWithPermit(Callable<T> callable, CompletableFuture<T> result, long timeoutNanos)
+      throws Exception {
     if (sharedLimit == null) {
       return callable.call();
     }
@@ -398,16 +405,16 @@ public final class Parallel {
       if (result.isDone() || Thread.currentThread().isInterrupted()) {
         throw new InterruptedException("Cancelled while waiting for a permit");
       }
-      startTimeout(result);
+      startTimeout(result, timeoutNanos);
       return callable.call();
     } finally {
       sharedLimit.release();
     }
   }
 
-  private void startTimeout(CompletableFuture<?> result) {
+  private void startTimeout(CompletableFuture<?> result, long timeoutNanos) {
     if (timeout != null) {
-      result.orTimeout(timeout.toNanos(), TimeUnit.NANOSECONDS);
+      result.orTimeout(timeoutNanos, TimeUnit.NANOSECONDS);
     }
   }
 
