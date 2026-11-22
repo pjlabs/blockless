@@ -60,7 +60,9 @@ class CallableContextIntegrationTest {
     final var mdc = new Slf4jMdcContextPropagator();
     MDC.clear();
     try {
-      if (parentValue != null) MDC.put("k", parentValue);
+      if (parentValue != null) {
+        MDC.put("k", parentValue);
+      }
       final var wrapped = CallableContext.wrap(() -> MDC.get("k"), mdc);
       try (final var worker = Executors.newSingleThreadExecutor()) {
         worker.submit(() -> MDC.put("k", "worker-value")).get(5, TimeUnit.SECONDS);
