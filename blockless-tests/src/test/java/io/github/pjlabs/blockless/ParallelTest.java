@@ -12,18 +12,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.github.pjlabs.blockless.context.slf4j.Slf4jMdcContextPropagator;
 import java.nio.file.Files;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import jdk.jfr.Recording;
@@ -331,6 +337,48 @@ class ParallelTest {
       assertThrows(
           IllegalArgumentException.class,
           () -> Parallel.create(new Slf4jMdcContextPropagator()).withMaxConcurrency(0));
+    }
+
+    // The next two tests pin the scope: each call gets its own window, and async() ignores the
+    // limit. For a limit across calls, use withSharedLimit. Changing either must be deliberate.
+    @Test
+    void appliesToEachCallSeparately() throws Exception {
+      final var bounded = parallel.withMaxConcurrency(2);
+      // Passes only if both calls run their 2 tasks at the same time, 4 in total.
+      final var allRunning = new CyclicBarrier(4);
+      final var first =
+          new FutureTask<>(() -> bounded.map(List.of(1, 2), i -> awaitAll(allRunning, i)));
+      final var second =
+          new FutureTask<>(() -> bounded.map(List.of(3, 4), i -> awaitAll(allRunning, i)));
+      Thread.startVirtualThread(first);
+      Thread.startVirtualThread(second);
+      assertEquals(List.of(1, 2), first.get(5, TimeUnit.SECONDS));
+      assertEquals(List.of(3, 4), second.get(5, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void doesNotLimitAsync() {
+      final var bounded = parallel.withMaxConcurrency(1);
+      // Passes only if all 3 async tasks run at the same time.
+      final var allRunning = new CyclicBarrier(3);
+      final var results =
+          IntStream.range(0, 3)
+              .mapToObj(i -> bounded.async(() -> awaitAll(allRunning, i)))
+              .toList();
+      assertEquals(List.of(0, 1, 2), results.stream().map(Supplier::get).toList());
+    }
+
+    /** Returns {@code item} once every party has reached {@code barrier}; fails after 3 s. */
+    private <T> T awaitAll(CyclicBarrier barrier, T item) {
+      try {
+        barrier.await(3, TimeUnit.SECONDS);
+        return item;
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException(e);
+      } catch (BrokenBarrierException | TimeoutException e) {
+        throw new IllegalStateException("tasks did not all run at the same time", e);
+      }
     }
   }
 
@@ -944,17 +992,6 @@ class ParallelTest {
       assertSame(original, assertThrows(IllegalArgumentException.class, supplier::get));
     }
 
-    private String waitIgnoringInterrupts(CountDownLatch release, CountDownLatch interrupted) {
-      while (true) {
-        try {
-          release.await();
-          return "late result";
-        } catch (InterruptedException ignored) {
-          interrupted.countDown();
-        }
-      }
-    }
-
     @Test
     void completesWithinTimeout() {
       final var timedParallel =
@@ -1101,6 +1138,220 @@ class ParallelTest {
           IllegalArgumentException.class,
           () ->
               Parallel.create(new Slf4jMdcContextPropagator()).withTimeout(Duration.ofMillis(-1)));
+    }
+  }
+
+  @Nested
+  class SharedLimit {
+
+    private final AtomicInteger current = new AtomicInteger();
+    private final AtomicInteger peak = new AtomicInteger();
+
+    /** Simulates a 50 ms call to an external service and records peak concurrency. */
+    private int callExternalService(int item) {
+      final var now = current.incrementAndGet();
+      peak.accumulateAndGet(now, Math::max);
+      try {
+        Thread.sleep(50);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new RuntimeException(e);
+      } finally {
+        current.decrementAndGet();
+      }
+      return item;
+    }
+
+    /** Starts every request at the same moment, like simultaneous incoming requests. */
+    private void runSimultaneously(Runnable... requests) throws Exception {
+      final var start = new CountDownLatch(1);
+      final var running = new ArrayList<FutureTask<Void>>();
+      for (final var request : requests) {
+        final var task =
+            new FutureTask<Void>(
+                () -> {
+                  start.await();
+                  request.run();
+                  return null;
+                });
+        running.add(task);
+        Thread.startVirtualThread(task);
+      }
+      start.countDown();
+      for (final var task : running) {
+        task.get(10, TimeUnit.SECONDS);
+      }
+    }
+
+    private void awaitCondition(BooleanSupplier condition) throws InterruptedException {
+      final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+      while (!condition.getAsBoolean()) {
+        assertTrue(System.nanoTime() < deadline, "condition not met within 3 seconds");
+        Thread.sleep(10);
+      }
+    }
+
+    @Test
+    void limitsSimultaneousCallsOnOneInstance() throws Exception {
+      final var limit = new Semaphore(3);
+      final var limited = parallel.withSharedLimit(limit);
+      final var items = IntStream.range(0, 12).boxed().toList();
+
+      runSimultaneously(
+          () -> assertEquals(items, limited.map(items, this::callExternalService)),
+          () -> assertEquals(items, limited.map(items, this::callExternalService)));
+
+      assertTrue(peak.get() <= 3, "expected max 3 across both calls, but was " + peak.get());
+      // A worker publishes its result before it releases its permit, so wait for the release.
+      awaitCondition(() -> limit.availablePermits() == 3);
+    }
+
+    @Test
+    void limitsInstancesSharingTheSameSemaphore() throws Exception {
+      final var limit = new Semaphore(2);
+      final var first = parallel.withSharedLimit(limit);
+      final var second =
+          Parallel.create()
+              .withSharedLimit(limit)
+              .withMaxConcurrency(5)
+              .withTimeout(Duration.ofSeconds(5));
+      final var items = IntStream.range(0, 8).boxed().toList();
+
+      runSimultaneously(
+          () -> first.map(items, this::callExternalService),
+          () -> second.toEither(items, this::callExternalService));
+
+      assertTrue(peak.get() <= 2, "expected max 2 across both instances, but was " + peak.get());
+      // A worker publishes its result before it releases its permit, so wait for the release.
+      awaitCondition(() -> limit.availablePermits() == 2);
+    }
+
+    @Test
+    void appliesToAsync() throws Exception {
+      final var limit = new Semaphore(2);
+      final var limited = parallel.withSharedLimit(limit);
+
+      final var suppliers =
+          IntStream.range(0, 8).mapToObj(i -> limited.async(() -> callExternalService(i))).toList();
+      suppliers.forEach(Supplier::get);
+
+      assertTrue(peak.get() <= 2, "expected max 2 async tasks, but was " + peak.get());
+      // A worker publishes its result before it releases its permit, so wait for the release.
+      awaitCondition(() -> limit.availablePermits() == 2);
+    }
+
+    @Test
+    void propagatesMdc() {
+      MDC.put("traceId", "shared-limit-trace");
+      final var limited = parallel.withSharedLimit(new Semaphore(1));
+      final var results = limited.map(List.of(1, 2, 3), i -> MDC.get("traceId"));
+      assertTrue(results.stream().allMatch("shared-limit-trace"::equals));
+    }
+
+    @Test
+    void returnsPermitsAfterFailure() throws Exception {
+      final var limit = new Semaphore(2);
+      final var limited = parallel.withSharedLimit(limit);
+
+      assertThrows(
+          IllegalStateException.class,
+          () ->
+              limited.map(
+                  List.of(1, 2, 3, 4, 5),
+                  i -> {
+                    if (i == 3) {
+                      throw new IllegalStateException("failed");
+                    }
+                    return callExternalService(i);
+                  }));
+
+      // map() does not wait for cancelled workers to exit, so wait for their permits.
+      awaitCondition(() -> limit.availablePermits() == 2);
+    }
+
+    @Test
+    void cancelledTaskWaitingForPermitNeverRuns() throws Exception {
+      final var limit = new Semaphore(1);
+      limit.acquire(); // occupy the only permit
+      final var started = new AtomicInteger();
+      final var waiting =
+          new FutureTask<>(
+              () ->
+                  parallel
+                      .withSharedLimit(limit)
+                      .map(
+                          List.of(0, 1, 2),
+                          i -> {
+                            started.incrementAndGet();
+                            return i;
+                          }));
+      final var caller = Thread.startVirtualThread(waiting);
+
+      // Interrupting the map() caller cancels its tasks, which are all waiting for the permit.
+      // An interrupted async() waiter does not cancel its task, so map() is the way to cancel.
+      awaitCondition(() -> limit.getQueueLength() == 3);
+      caller.interrupt();
+      final var failure =
+          assertThrows(ExecutionException.class, () -> waiting.get(3, TimeUnit.SECONDS));
+      assertInstanceOf(InterruptedException.class, failure.getCause().getCause());
+
+      // The cancelled workers must stop waiting, not hold their place until a permit frees up.
+      awaitCondition(() -> !limit.hasQueuedThreads());
+      limit.release();
+      Thread.sleep(100);
+      assertEquals(0, started.get(), "tasks cancelled while waiting for a permit must not run");
+      assertEquals(1, limit.availablePermits());
+    }
+
+    @Test
+    void timeWaitingForPermitDoesNotCountTowardTimeout() {
+      final var limited =
+          parallel.withSharedLimit(new Semaphore(1)).withTimeout(Duration.ofMillis(150));
+      final var items = IntStream.range(0, 5).boxed().toList();
+
+      // Each task runs for 50 ms, but the last one waits about 200 ms for the only permit.
+      assertEquals(items, limited.map(items, this::callExternalService));
+    }
+
+    @Test
+    void timedOutTaskKeepsPermitUntilItExits() throws Exception {
+      final var limit = new Semaphore(1);
+      final var release = new CountDownLatch(1);
+      final var interrupted = new CountDownLatch(1);
+      final var supplier =
+          parallel
+              .withSharedLimit(limit)
+              .withTimeout(Duration.ofMillis(50))
+              .async(() -> waitIgnoringInterrupts(release, interrupted));
+      try {
+        final var failure = assertThrows(RuntimeException.class, supplier::get);
+        assertInstanceOf(TimeoutException.class, failure.getCause());
+        assertTrue(interrupted.await(3, TimeUnit.SECONDS));
+        assertEquals(
+            0,
+            limit.availablePermits(),
+            "a timed-out task that is still running must keep its permit");
+      } finally {
+        release.countDown();
+      }
+      awaitCondition(() -> limit.availablePermits() == 1);
+    }
+
+    @Test
+    void rejectsNullLimit() {
+      assertThrows(NullPointerException.class, () -> parallel.withSharedLimit(null));
+    }
+  }
+
+  /** Blocks until {@code release} opens, counting down {@code interrupted} on each interrupt. */
+  private static String waitIgnoringInterrupts(CountDownLatch release, CountDownLatch interrupted) {
+    while (true) {
+      try {
+        release.await();
+        return "late result";
+      } catch (InterruptedException ignored) {
+        interrupted.countDown();
+      }
     }
   }
 }

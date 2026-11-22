@@ -98,6 +98,11 @@ Map<String, Profile> profiles = parallel.asMap(userIds, id -> loadProfile(id));
 var boundedParallel = parallel.withMaxConcurrency(10);
 List<String> names = boundedParallel.map(userIds, id -> fetchName(id));
 
+// Cap calls to one external service across ALL requests: share one Semaphore,
+// held in a field, e.g. static final Semaphore EXTERNAL_SERVICE_LIMIT = new Semaphore(10);
+var externalService = parallel.withSharedLimit(EXTERNAL_SERVICE_LIMIT);
+List<String> names = externalService.map(userIds, id -> fetchName(id));
+
 // Per-task timeout — result fails and worker is interrupted at the deadline
 var timedParallel = parallel.withTimeout(Duration.ofSeconds(5));
 List<String> names = timedParallel.map(userIds, id -> fetchName(id));
@@ -110,14 +115,21 @@ List<Either<String, Throwable>> results = parallel.toEither(ids, id -> riskyFetc
 ```
 
 `withMaxConcurrency(n)` is a per-call limit for `map()`, `toEither()`, `asMap()` and
-`toEitherMap()`, not a process-wide one: concurrent calls each get their own window, and `async()`
-ignores it. For a process-wide cap, guard the call with a shared `Semaphore` in your own code.
+`toEitherMap()`: concurrent calls each get their own window, so two simultaneous requests can run
+2 × N tasks, and `async()` ignores it. `withSharedLimit` limits every call, thread and `Parallel`
+instance that uses the same `Semaphore`, including `async()`. Use it to protect an external service,
+and keep the semaphore in a field so it is shared. Combine both for large batches. Don't wait for
+tasks that use the same semaphore from inside one of its tasks: if every permit is held by a waiting
+task, they deadlock.
 
 Each task's worker is started before its timeout is registered. The timeout budget runs from
 registration; time queued for a concurrency slot and any delay before registration do not count.
-This is a per-task timeout, not a deadline from submission or for the whole batch. `map()` throws a
-wrapped `TimeoutException`, while `toEither()` collects it as `Either.fail()` and continues processing
-the other items.
+With `withSharedLimit`, the timeout is registered once the task holds its permit, so time spent
+waiting for a permit does not count either. The timeout does not bound that wait: if every permit
+is held by tasks that ignore interruption, callers block until one of them returns. This is a
+per-task timeout, not a deadline from submission or for the whole batch. `map()` throws a wrapped
+`TimeoutException`, while `toEither()` collects it as `Either.fail()` and continues processing the
+other items.
 
 On failure, `map()` interrupts the other active workers without waiting for their cleanup. A task
 that ignores interruption may keep running after its result has timed out or the batch has returned.
