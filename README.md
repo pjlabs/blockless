@@ -51,6 +51,62 @@ Also works with callables — runs them on a virtual thread and blocks for the r
 var answer = Blockless.get(() -> expensiveComputation());
 ```
 
+## Experimental: lazy helping
+
+Configure `LazyHelpingExecutor` once as your application's request/task executor:
+
+```java
+var requests = LazyHelpingExecutor.newFixedThreadPool(4);
+// Install requests as the framework's executor; shut it down with your application.
+```
+
+Business code uses the existing APIs:
+
+```java
+var user = Blockless.supplier(() -> loadUser(id));
+return user.get();
+```
+
+Tasks normally start on platform workers. While a worker waits in a pending
+`Blockless.get()`, supplier `get()`, or `Parallel.async(...).get()`, it checks its
+executor's queue and starts queued tasks on virtual threads. Helping starts only
+when a supported wait occurs, hence **lazy helping**. Completion wakes the
+original caller, and `get()` returns the real value or throws the task's failure.
+
+The original caller retains its native stack, thread identity, locals and lock
+ownership. With no queued work, it waits for a signal. Helped tasks have their own
+thread identity; they inherit inheritable thread-local and class-loader state
+from their submitter, rather than from the waiting worker.
+
+The worker count limits platform workers, **not total concurrent tasks** or shared
+JDK virtual-thread carriers. Arbitrary blocking calls and unmanaged executors do
+not help. No context propagators are required; use `PropagatingExecutorService`
+when submitting tasks needs explicit context capture. Existing supplier bodies
+keep their separate lifetime and are not cancelled with a waiting caller.
+Executor termination waits for actual submitted-task cleanup, even after its
+Future has been cancelled. `shutdownNow()` interrupts running tasks and cancels
+queued Future tasks.
+
+This is an opt-in, experimental executor using public Java 21 APIs. It needs no
+agent, bytecode rewriting, preview features or exports/opens. Frameworks must
+support configuring their executor; arbitrary existing pools are not intercepted.
+
+Confirmed core tests on these JVMs:
+
+| JVM | Java 21 | Java 25 |
+|---|---|---|
+| Amazon Corretto | 21.0.13.1+2 | 25.0.5.1+2 |
+| Oracle HotSpot | 21.0.12.1+1 | 25.0.5.1+4 |
+
+A local Corretto 21 gRPC comparison measured 368 requests/s for the ordinary
+four-worker pool, 939 for lazy helping and 932 for a virtual-thread executor.
+All 33,696 measured requests succeeded. These are medians of five samples after
+ten seconds warmup, with ten database connections, 10 ms simulated query I/O and
+32 concurrent requests. Lazy helping retained four platform request workers;
+two shared virtual-thread carriers were observed in both pool modes. These are
+snapshots, not a global thread limit. See the
+[benchmark fixture](https://github.com/jimbao/blockless/tree/0e765f0e49821572f35223fe506c4d7664ba6ae2/experiments/continuation-entry/alternatives/network).
+
 ## Why `Parallel`
 
 Services often need to fan out N calls and collect the results. The typical

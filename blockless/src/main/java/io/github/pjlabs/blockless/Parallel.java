@@ -272,7 +272,7 @@ public final class Parallel {
     // Waits until the future settles. orTimeout opens the latch without the worker exiting.
     R await() {
       try {
-        latch.await();
+        HelpingWait.await(latch);
       } catch (InterruptedException e) {
         // Interruption ends only this caller's wait; other callers still share the outcome.
         Thread.currentThread().interrupt();
@@ -333,6 +333,7 @@ public final class Parallel {
                 failure instanceof CompletionException wrapped ? wrapped.getCause() : failure);
           } finally {
             latch.countDown();
+            HelpingWait.signal(latch);
           }
         });
 
