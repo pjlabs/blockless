@@ -53,19 +53,25 @@ var answer = Blockless.get(() -> expensiveComputation());
 
 ## Experimental: lazy helping
 
-Configure `LazyHelpingExecutor` once as your application's request/task executor:
+Create a helping executor once, then submit the outer task containing the wait:
 
 ```java
 var requests = LazyHelpingExecutor.newFixedThreadPool(4);
-// Install requests as the framework's executor; shut it down with your application.
+var result = requests.submit(() -> {
+    var user = Blockless.supplier(() -> loadUser(id));
+    return user.get();
+});
+// Shut down requests with your application.
 ```
 
-Business code uses the existing APIs:
+Using it as a framework's request executor is another way to establish this task
+boundary. Only the task containing the supported wait needs to run on the helping
+executor; replacing the framework's executor is optional. Business code keeps the
+existing supplier APIs.
 
-```java
-var user = Blockless.supplier(() -> loadUser(id));
-return user.get();
-```
+The submitting thread is outside this boundary. If it calls `result.get()`, that
+is an ordinary Future wait. To keep a platform submitting thread available, it
+must hand off the task and return instead of waiting for the outer Future.
 
 Tasks normally start on platform workers. While a worker waits in a pending
 `Blockless.get()`, supplier `get()`, or `Parallel.async(...).get()`, it checks its
@@ -88,8 +94,8 @@ Future has been cancelled. `shutdownNow()` interrupts running tasks and cancels
 queued Future tasks.
 
 This is an opt-in, experimental executor using public Java 21 APIs. It needs no
-agent, bytecode rewriting, preview features or exports/opens. Frameworks must
-support configuring their executor; arbitrary existing pools are not intercepted.
+agent, bytecode rewriting, preview features or exports/opens. It helps only its
+own queue; arbitrary existing pools are not intercepted.
 
 Confirmed core tests on these JVMs:
 
