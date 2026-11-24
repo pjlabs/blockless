@@ -108,7 +108,7 @@ public final class Parallel {
    *
    * <p>Once the task has finished, {@code get()} returns its outcome even if the caller is
    * interrupted. An interruption while waiting affects only that caller: its {@code get()} throws
-   * and keeps the interrupt flag, and the task keeps running for other callers.
+   * and keeps the interrupt flag, and the task keeps running.
    *
    * <p>{@link #withMaxConcurrency(int)} does not affect this method — it only controls the sliding
    * window in {@link #map} and {@link #toEither}. For bounded batch work, use {@link #map}.

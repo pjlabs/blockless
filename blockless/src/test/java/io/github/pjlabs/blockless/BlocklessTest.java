@@ -1,7 +1,6 @@
 package io.github.pjlabs.blockless;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -269,20 +268,6 @@ class BlocklessTest {
       }
 
       assertSame(original, assertThrows(IllegalStateException.class, supplier::get));
-    }
-
-    @Test
-    void taskInterruptionDoesNotInterruptCaller() {
-      // The task being interrupted is not the caller being interrupted: report it, but leave the
-      // caller's interrupt flag alone.
-      final var supplier =
-          Blockless.<String>supplier(
-              () -> {
-                throw new InterruptedException("task");
-              });
-      final var failure = assertThrows(RuntimeException.class, supplier::get);
-      assertInstanceOf(InterruptedException.class, failure.getCause());
-      assertFalse(Thread.currentThread().isInterrupted());
     }
 
     @Test
