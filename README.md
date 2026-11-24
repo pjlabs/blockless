@@ -53,14 +53,24 @@ var answer = Blockless.get(() -> expensiveComputation());
 
 ## Experimental: lazy helping
 
-"Lazy helping" is a descriptive working name chosen for this implementation,
-not the name of a standard Java feature. "Lazy" means it activates during a
-supported wait; "helping" means the waiting worker dispatches queued tasks.
-Related task helping exists in the JDK, for example
-[`ForkJoinTask.helpQuiesce()`](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ForkJoinTask.html#helpQuiesce()).
-That method executes tasks; this executor dispatches them onto virtual threads.
+When every worker in a platform pool is waiting for I/O, new tasks remain queued.
+`LazyHelpingExecutor` lets a waiting worker keep that queue moving by starting
+queued tasks on virtual threads. Business code still reads synchronously.
 
-Create a helping executor once, then submit the outer task containing the wait:
+The design has three steps:
+
+1. A submitted task, such as a request handler, normally starts on a platform worker.
+2. At a supported pending `get()`, that worker keeps the original caller's stack
+   and dispatches queued tasks onto virtual threads.
+3. When its own result arrives, `get()` returns and the original task continues.
+   Already-started helped tasks continue independently.
+
+The platform pool has a fixed worker count. Helped tasks use virtual threads that
+share the JDK's native carrier threads; they do not need a native thread per task.
+
+### Usage
+
+Create the executor once and submit the outer task containing the wait:
 
 ```java
 var requests = LazyHelpingExecutor.newFixedThreadPool(4);
@@ -71,34 +81,24 @@ var result = requests.submit(() -> {
 // Shut down requests with your application.
 ```
 
-Using it as a framework's request executor is another way to establish this task
-boundary. Only the task containing the supported wait needs to run on the helping
-executor; replacing the framework's executor is optional. Business code keeps the
-existing supplier APIs.
+Supported waits are `Blockless.get(...)`, `Blockless.supplier(...).get()` and
+`Parallel.async(...).get()`. Only the outer task containing that wait needs to
+run on this executor. Installing it as a framework's request executor is optional.
 
-The submitting thread is outside this boundary. If it calls `result.get()`, that
-is an ordinary Future wait. To keep a platform submitting thread available, it
-must hand off the task and return instead of waiting for the outer Future.
-
-Tasks normally start on platform workers. While a worker waits in a pending
-`Blockless.get()`, supplier `get()`, or `Parallel.async(...).get()`, it checks its
-executor's queue and starts queued tasks on virtual threads. Completion wakes
-the original caller, and `get()` returns the real value or throws the task's failure.
+The submitting thread is outside this boundary. Calling `result.get()` there is
+an ordinary Future wait. To keep a platform submitting thread available, hand off
+the task and return instead of waiting for the outer Future.
 
 ### Five requests with one platform worker
 
-Use `LazyHelpingExecutor.newFixedThreadPool(1)`. Assume request 1's I/O stays
-pending while requests 2–5 arrive, and each request uses one supplier:
-
-```java
-var user = Blockless.supplier(() -> loadUser(id));
-return user.get();
-```
+Use `LazyHelpingExecutor.newFixedThreadPool(1)`. Assume all five requests execute
+the task shown above, and request 1's I/O stays pending while requests 2–5 arrive.
 
 Platform worker `P` starts request 1. Its supplier starts an I/O virtual thread.
 At `get()`, `P` enters the helping loop while retaining request 1's stack.
 It takes queued requests 2–5 and starts each on a separate virtual thread.
-Those requests run the same code, each starting its own I/O virtual thread.
+Each helped thread runs an entire outer request, whose supplier starts its own
+I/O virtual thread.
 
 | Request | Thread running request code | While its supplier is pending |
 |---|---|---|
@@ -110,33 +110,52 @@ Those requests run the same code, each starting its own I/O virtual thread.
 
 Once the queue is empty, `P` waits for more queued work or request 1's result.
 If request 3's I/O finishes first, the JDK resumes `V3` after its `get()` and
-request 3 completes independently of `P`. When request 1's I/O finishes, `P`
-exits its helping loop, its `get()` returns, and request 1 continues normally.
+request 3 completes independently of `P`.
+
+When request 1's I/O finishes, `P` exits its helping loop and its `get()` returns.
+It does not wait for requests 2–5 or for the queue to empty. After request 1
+finishes, `P` can take another task from the normal queue.
 
 If all five I/O bodies are pending at once, there is one platform request
 worker, four started virtual caller threads and five virtual supplier-body
-threads. The virtual threads share the JDK's native carrier threads. `P`
-dispatches all five requests; only request 1's business code runs directly on `P`.
+threads, plus the shared native carriers. `P` dispatches all five requests;
+only request 1's business code runs directly on `P`.
+
+### Queues and task ownership
+
+Ordinary fixed-pool scheduling decides what is queued: the executor creates
+platform workers up to its configured count, then offers submissions to its
+shared queue. An idle worker may take a submission immediately. A worker inside
+a helping wait can also take queued tasks and launch them on virtual threads.
+Only this executor's queue is visible to helping.
+
+The helper executor uses `Executors.newThreadPerTaskExecutor` with a factory that
+returns virtual threads. It tracks started tasks until they actually exit. The
+JDK schedules and resumes those threads; they do not depend on their launching
+platform worker continuing to help. Remaining queued tasks are taken by normal
+platform workers or another helping worker.
 
 ### Scope and shutdown
 
 The original caller retains its native stack, thread identity, locals and lock
-ownership. With no queued work, it waits for a signal. Helped tasks have their own
-thread identity; they inherit inheritable thread-local and class-loader state
-from their submitter, rather than from the waiting worker.
+ownership. Helped tasks have their own thread identity and inherit inheritable
+thread-local and class-loader state from their submitter. No context propagators
+are required; use `PropagatingExecutorService` for explicit context capture.
 
 The worker count limits platform workers, **not total concurrent tasks** or shared
-JDK virtual-thread carriers. Arbitrary blocking calls and unmanaged executors do
-not help. No context propagators are required; use `PropagatingExecutorService`
-when submitting tasks needs explicit context capture. Existing supplier bodies
-keep their separate lifetime and are not cancelled with a waiting caller.
-Executor termination waits for actual submitted-task cleanup, even after its
-Future has been cancelled. `shutdownNow()` interrupts running tasks and cancels
-queued Future tasks.
+JDK carriers. Other blocking calls and unmanaged executors do not trigger helping.
+The original platform worker waits for a signal when it has no queued work to
+launch; its stack stays on that worker throughout the wait.
 
-This is an opt-in, experimental executor using public Java 21 APIs. It needs no
-agent, bytecode rewriting, preview features or exports/opens. It helps only its
-own queue; arbitrary existing pools are not intercepted.
+`shutdown()` rejects new submissions, processes accepted queued tasks and waits
+for running outer tasks, including helped tasks, to exit. A cancelled Future
+can be done before its task's `finally` finishes, so termination tracks actual
+task exit. `shutdownNow()` interrupts running tasks and cancels queued Future
+tasks. Supplier bodies retain their existing separate lifetime and are not
+cancelled with a waiting caller.
+
+This opt-in, experimental executor uses public Java 21 APIs. It needs no agent,
+bytecode rewriting, preview features or exports/opens.
 
 ### JVM support and measurements
 
@@ -155,6 +174,15 @@ ten seconds warmup, with ten database connections, 10 ms simulated query I/O and
 two shared virtual-thread carriers were observed in both pool modes. These are
 snapshots, not a global thread limit. See the
 [benchmark fixture](https://github.com/jimbao/blockless/tree/0e765f0e49821572f35223fe506c4d7664ba6ae2/experiments/continuation-entry/alternatives/network).
+
+### About the name
+
+"Lazy helping" is a descriptive working name chosen for this implementation,
+not a standard Java feature. "Lazy" means it activates during a supported wait;
+"helping" means the waiting worker dispatches queued tasks. Related task helping
+exists in the JDK, for example
+[`ForkJoinTask.helpQuiesce()`](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ForkJoinTask.html#helpQuiesce()).
+That method executes tasks; this executor dispatches them onto virtual threads.
 
 ## Why `Parallel`
 
