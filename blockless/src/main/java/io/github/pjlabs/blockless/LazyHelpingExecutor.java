@@ -8,14 +8,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.UnaryOperator;
 
 /**
  * An experimental executor whose waiting platform workers dispatch queued tasks onto virtual
@@ -26,9 +28,16 @@ import java.util.concurrent.locks.ReentrantLock;
  * available. Its stack, thread identity and thread-local state stay on the original worker; helped
  * tasks run on separate virtual threads. Other blocking calls do not help.
  *
- * <p>The worker count limits platform workers, not logical concurrency or shared JDK carriers. Even
- * one platform worker can dispatch concurrent virtual tasks. No context propagators are required;
- * use {@link PropagatingExecutorService} when submitted tasks need explicit context capture.
+ * <p>The worker count limits platform workers. Even one platform worker can dispatch concurrent
+ * virtual tasks. The optional {@code maxHelped} parameter caps concurrently running helped tasks
+ * across the executor. Size it to the downstream resource, such as the database connection pool.
+ * Overloads that omit {@code maxHelped} leave helping unbounded.
+ *
+ * <p>On Java 21, helped tasks that block inside {@code synchronized} code pin their carrier. Use
+ * Java 24 or later for such workloads (see <a href="https://openjdk.org/jeps/491">JEP 491</a>).
+ *
+ * <p>No context propagators are required. Use {@link PropagatingExecutorService} when submitted
+ * tasks need explicit context capture.
  *
  * <p>Shutdown waits for actual submitted-task cleanup, including helped tasks whose Futures were
  * cancelled. Independently started supplier bodies retain their existing separate lifetime. Uses
@@ -37,29 +46,65 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class LazyHelpingExecutor extends AbstractExecutorService {
   private final ReentrantLock state = new ReentrantLock();
   private final Condition progress = state.newCondition();
-  private final LinkedBlockingQueue<Runnable> queue = new LinkedBlockingQueue<>();
+  private final LinkedBlockingDeque<Runnable> queue = new LinkedBlockingDeque<>();
   private final ThreadPoolExecutor platform;
   private final ExecutorService helped;
+  private final Semaphore helpedPermits;
   private final ThreadLocal<Dispatch> launching = new ThreadLocal<>();
   private final List<Thread> nativeRunners = new ArrayList<>();
   private final AtomicLong sequence = new AtomicLong();
   private final Runnable finisher = this::finishShutdown;
+  private int waitingHelpers;
   private boolean shutdown;
   private boolean stopped;
   private boolean finisherSubmitted;
 
-  /** Creates an executor with a fixed number of platform workers from the supplied factory. */
+  /** Creates a fixed platform pool with a custom thread factory and unbounded helping. */
   public static ExecutorService newFixedThreadPool(int workers, ThreadFactory factory) {
-    return new LazyHelpingExecutor(workers, factory);
+    return new LazyHelpingExecutor(workers, factory, null, UnaryOperator.identity());
   }
 
-  /** Creates an executor with a fixed number of non-daemon platform workers. */
+  /** Creates a fixed pool of non-daemon platform workers with unbounded helping. */
   public static ExecutorService newFixedThreadPool(int workers) {
-    return new LazyHelpingExecutor(workers, Executors.defaultThreadFactory());
+    return newFixedThreadPool(workers, Executors.defaultThreadFactory());
   }
 
-  private LazyHelpingExecutor(int workers, ThreadFactory factory) {
+  /**
+   * Creates an executor with fixed non-daemon platform workers and a cap on helping.
+   *
+   * @param workers the number of platform workers
+   * @param maxHelped the maximum number of concurrently running helped tasks
+   * @return the executor
+   * @throws IllegalArgumentException if {@code workers} or {@code maxHelped} is less than 1
+   */
+  public static ExecutorService newFixedThreadPool(int workers, int maxHelped) {
+    return newFixedThreadPool(workers, maxHelped, Executors.defaultThreadFactory());
+  }
+
+  /**
+   * Creates an executor with fixed platform workers from the supplied factory and a cap on helping.
+   *
+   * @param workers the number of platform workers
+   * @param maxHelped the maximum number of concurrently running helped tasks
+   * @param factory the factory for platform workers
+   * @return the executor
+   * @throws IllegalArgumentException if {@code workers} or {@code maxHelped} is less than 1
+   */
+  public static ExecutorService newFixedThreadPool(
+      int workers, int maxHelped, ThreadFactory factory) {
+    if (maxHelped < 1) throw new IllegalArgumentException("maxHelped must be positive");
+    return new LazyHelpingExecutor(
+        workers, factory, new Semaphore(maxHelped), UnaryOperator.identity());
+  }
+
+  // The wrapper lets tests inject failures in the helped thread factory.
+  LazyHelpingExecutor(
+      int workers,
+      ThreadFactory factory,
+      Semaphore helpedPermits,
+      UnaryOperator<ThreadFactory> wrapHelpedFactory) {
     Objects.requireNonNull(factory, "factory");
+    this.helpedPermits = helpedPermits;
     platform =
         new ThreadPoolExecutor(
             workers,
@@ -73,26 +118,27 @@ public final class LazyHelpingExecutor extends AbstractExecutorService {
                 throw new IllegalArgumentException("Platform factory required");
               return thread;
             });
-    helped =
-        Executors.newThreadPerTaskExecutor(
-            taskRunner -> {
-              final var dispatch =
-                  Objects.requireNonNull(launching.get(), "missing helped dispatch");
-              dispatch.deferred.target = taskRunner;
-              return dispatch.virtual;
-            });
+    // Reading launching relies on newThreadPerTaskExecutor calling newThread synchronously
+    // on the thread that calls execute.
+    final ThreadFactory helpedFactory =
+        taskRunner -> {
+          final var dispatch = Objects.requireNonNull(launching.get(), "missing helped dispatch");
+          dispatch.deferred.target = taskRunner;
+          return dispatch.virtual;
+        };
+    helped = Executors.newThreadPerTaskExecutor(wrapHelpedFactory.apply(helpedFactory));
+    HelpingWait.enabled = true;
   }
 
   @Override
   public void execute(Runnable task) {
     Objects.requireNonNull(task, "task");
-    // Construction, and therefore ITL/CCL inheritance, occurs on the submitter.
     final var dispatch = new Dispatch(task);
     state.lock();
     try {
       if (shutdown) throw new RejectedExecutionException("Executor shut down");
       platform.execute(dispatch);
-      progress.signalAll();
+      if (waitingHelpers > 0) progress.signalAll();
     } finally {
       state.unlock();
     }
@@ -101,7 +147,7 @@ public final class LazyHelpingExecutor extends AbstractExecutorService {
   void signalProgress() {
     state.lock();
     try {
-      progress.signalAll();
+      if (waitingHelpers > 0) progress.signalAll();
     } finally {
       state.unlock();
     }
@@ -109,32 +155,65 @@ public final class LazyHelpingExecutor extends AbstractExecutorService {
 
   void helpUntil(CountDownLatch latch) throws InterruptedException {
     while (true) {
-      final Dispatch dispatch;
+      Dispatch abandoned = null;
+      Throwable launchFailure = null;
       state.lockInterruptibly();
       try {
         if (latch.getCount() == 0) return;
-        final var queued = queue.peek();
-        if (!(queued instanceof Dispatch)) {
-          progress.await();
+        if (!(queue.peek() instanceof Dispatch)
+            || (helpedPermits != null && !helpedPermits.tryAcquire())) {
+          waitingHelpers++;
+          try {
+            progress.await();
+          } finally {
+            waitingHelpers--;
+          }
           continue;
         }
         // A normal platform worker may have taken the peeked task in the meantime.
         final var candidate = queue.poll();
-        if (!(candidate instanceof Dispatch selected)) {
+        if (!(candidate instanceof Dispatch dispatch)) {
+          if (helpedPermits != null) helpedPermits.release();
           if (candidate != null) queue.add(candidate);
           continue;
         }
-        dispatch = selected;
         // Keep acceptance/lifecycle state locked through registration with the helper owner.
-        launching.set(dispatch);
         try {
+          launching.set(dispatch);
           helped.execute(dispatch::runHelped);
+        } catch (Throwable failure) {
+          if (helpedPermits != null) helpedPermits.release();
+          abandoned = dispatch;
+          launchFailure = failure;
+          if (requeueFailedLaunch(dispatch, failure)) abandoned = null;
+          if (waitingHelpers > 0) progress.signalAll();
+          throw failure;
         } finally {
           launching.remove();
         }
       } finally {
         state.unlock();
+        if (abandoned != null) {
+          // Foreign FutureTask.done hooks can call back into this executor.
+          try {
+            abandoned.cancelBeforeStart();
+          } catch (Throwable failure) {
+            appendFailure(launchFailure, failure);
+          }
+        }
       }
+    }
+  }
+
+  private boolean requeueFailedLaunch(Dispatch dispatch, Throwable launchFailure) {
+    // A failed start can leave the virtual thread unable to run on retry.
+    if (stopped || dispatch.virtual.getState() != Thread.State.NEW) return false;
+    try {
+      // Keep the dispatch ahead of the shutdown finisher.
+      return queue.offerFirst(dispatch);
+    } catch (Throwable failure) {
+      appendFailure(launchFailure, failure);
+      return false;
     }
   }
 
@@ -270,6 +349,8 @@ public final class LazyHelpingExecutor extends AbstractExecutorService {
         Math.max(0, nanos - (System.nanoTime() - start)), TimeUnit.NANOSECONDS);
   }
 
+  // Create the unstarted virtual thread at submit time so it inherits the submitter's
+  // InheritableThreadLocals and context class loader.
   private final class Dispatch implements Runnable {
     private final Runnable task;
     private final Deferred deferred = new Deferred();
@@ -312,7 +393,14 @@ public final class LazyHelpingExecutor extends AbstractExecutorService {
     }
 
     private void runHelped() {
-      task.run();
+      try {
+        task.run();
+      } finally {
+        if (helpedPermits != null) {
+          helpedPermits.release();
+          signalProgress();
+        }
+      }
     }
 
     private void cancelBeforeStart() {

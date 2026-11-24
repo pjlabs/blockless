@@ -6,6 +6,7 @@ import java.util.concurrent.CountDownLatch;
 
 /** Lets only this executor's platform workers help their queue while waiting for an outcome. */
 final class HelpingWait {
+  static volatile boolean enabled;
   static final ThreadLocal<LazyHelpingExecutor> CURRENT = new ThreadLocal<>();
   private static final ConcurrentHashMap<CountDownLatch, CopyOnWriteArrayList<Registration>>
       WAITERS = new ConcurrentHashMap<>();
@@ -13,8 +14,8 @@ final class HelpingWait {
   private HelpingWait() {}
 
   static void await(CountDownLatch latch) throws InterruptedException {
-    // Avoid creating a ThreadLocal entry for ordinary virtual-thread callers.
-    if (Thread.currentThread().isVirtual()) {
+    // Avoid creating a ThreadLocal entry before opt-in or for virtual-thread callers.
+    if (!enabled || Thread.currentThread().isVirtual()) {
       latch.await();
       return;
     }
@@ -45,6 +46,7 @@ final class HelpingWait {
   }
 
   static void signal(CountDownLatch latch) {
+    if (!enabled) return;
     final var registrations = WAITERS.get(latch);
     if (registrations != null) {
       for (final var registration : registrations) registration.owner.signalProgress();

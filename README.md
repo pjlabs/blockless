@@ -227,6 +227,14 @@ The submitting thread is outside this boundary. Calling `result.get()` there is
 an ordinary Future wait. To keep a platform submitting thread available, hand off
 the task and return instead of waiting for the outer Future.
 
+Use `LazyHelpingExecutor.newFixedThreadPool(4, maxHelped)` with a positive
+`maxHelped` to cap concurrent helped tasks across the executor. Size the cap to
+the downstream resource, such as a database connection pool, allowing room for
+platform workers' tasks. When the cap is reached, work stays queued until a
+helped task exits or a platform worker takes it. The
+`(workers, maxHelped, factory)` overload also accepts a custom platform thread
+factory. Overloads without `maxHelped` leave helping unbounded.
+
 ### Five requests with one platform worker
 
 Use `LazyHelpingExecutor.newFixedThreadPool(1)`. Assume all five requests execute
@@ -280,10 +288,11 @@ ownership. Helped tasks have their own thread identity and inherit inheritable
 thread-local and class-loader state from their submitter. No context propagators
 are required; use `PropagatingExecutorService` for explicit context capture.
 
-The worker count limits platform workers, **not total concurrent tasks** or shared
-JDK carriers. Other blocking calls and unmanaged executors do not trigger helping.
+The worker count limits platform workers. Shared JDK carriers are managed by
+the JVM. Other blocking calls and unmanaged executors do not trigger helping.
 The original platform worker waits for a signal when it has no queued work to
-launch; its stack stays on that worker throughout the wait.
+launch or the helping cap has been reached. Its stack stays on that worker
+throughout the wait.
 
 `shutdown()` rejects new submissions, processes accepted queued tasks and waits
 for running outer tasks, including helped tasks, to exit. A cancelled Future
@@ -297,6 +306,10 @@ bytecode rewriting, preview features or exports/opens.
 
 ### JVM support and measurements
 
+On Java 21, helped tasks that block inside `synchronized` code pin a carrier
+thread. For workloads with this blocking pattern, use Java 24 or later, which
+removes pinning due to synchronization through [JEP 491](https://openjdk.org/jeps/491).
+
 Confirmed core tests on these JVMs:
 
 | JVM | Java 21 | Java 25 |
@@ -308,10 +321,11 @@ A local Corretto 21 gRPC comparison measured 368 requests/s for the ordinary
 four-worker pool, 939 for lazy helping and 932 for a virtual-thread executor.
 All 33,696 measured requests succeeded. These are medians of five samples after
 ten seconds warmup, with ten database connections, 10 ms simulated query I/O and
-32 concurrent requests. Lazy helping retained four platform request workers;
-two shared virtual-thread carriers were observed in both pool modes. These are
-snapshots, not a global thread limit. See the
-[benchmark fixture](https://github.com/jimbao/blockless/tree/0e765f0e49821572f35223fe506c4d7664ba6ae2/experiments/continuation-entry/alternatives/network).
+32 concurrent requests. Lazy helping retained four platform request workers.
+Two shared virtual-thread carriers were observed in both pool modes during
+the measurement.
+
+<!-- TODO Add a repository-relative link when the benchmark fixture is available here. -->
 
 ### About the name
 

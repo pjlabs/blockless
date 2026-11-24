@@ -7,11 +7,14 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -43,6 +46,17 @@ class LazyHelpingExecutorTest {
               });
       assertEquals("Ada:read", user.get(5, TimeUnit.SECONDS));
     }
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {0, -1})
+  void rejectsNonPositiveHelpedLimits(int maxHelped) {
+    assertThrows(
+        IllegalArgumentException.class, () -> LazyHelpingExecutor.newFixedThreadPool(1, maxHelped));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            LazyHelpingExecutor.newFixedThreadPool(1, maxHelped, Executors.defaultThreadFactory()));
   }
 
   @Nested
@@ -157,6 +171,125 @@ class LazyHelpingExecutorTest {
       } finally {
         CONTEXT.remove();
         INHERITED.remove();
+      }
+    }
+
+    @Test
+    void capsHelpedConcurrencyAndStartsQueuedTasksAsPermitsFreeUp() throws Exception {
+      final var stage = new CompletableFuture<String>();
+      final var user = Blockless.supplier(stage);
+      final var started = new Semaphore(0);
+      final var finish = new Semaphore(0);
+      final var running = new AtomicInteger();
+      final var peak = new AtomicInteger();
+      try (final var executor = LazyHelpingExecutor.newFixedThreadPool(1, 2)) {
+        try {
+          final var caller = executor.submit(user::get);
+          final var queued = new ArrayList<Future<Void>>();
+          for (var i = 0; i < 5; i++) {
+            queued.add(
+                executor.submit(
+                    () -> {
+                      assertTrue(Thread.currentThread().isVirtual());
+                      peak.accumulateAndGet(running.incrementAndGet(), Math::max);
+                      try {
+                        started.release();
+                        finish.acquire();
+                        return null;
+                      } finally {
+                        running.decrementAndGet();
+                      }
+                    }));
+          }
+          assertTrue(started.tryAcquire(2, 5, TimeUnit.SECONDS));
+          assertFalse(started.tryAcquire(50, TimeUnit.MILLISECONDS));
+          for (var i = 0; i < 3; i++) {
+            finish.release();
+            assertTrue(started.tryAcquire(5, TimeUnit.SECONDS));
+          }
+          finish.release(2);
+          for (final var task : queued) task.get(5, TimeUnit.SECONDS);
+          assertEquals(2, peak.get());
+          assertFalse(caller.isDone());
+          stage.complete("Ada");
+          assertEquals("Ada", caller.get(5, TimeUnit.SECONDS));
+        } finally {
+          finish.release(5);
+          stage.complete("Ada");
+        }
+      }
+    }
+
+    @Test
+    void returnsPermitWhenHelpedTaskThrows() throws Exception {
+      final var stage = new CompletableFuture<String>();
+      final var user = Blockless.supplier(stage);
+      final var releaseFailure = new CountDownLatch(1);
+      final var uncaught = new CompletableFuture<Throwable>();
+      final var failure = new IllegalStateException("helped task failed");
+      try (final var executor = LazyHelpingExecutor.newFixedThreadPool(1, 1)) {
+        try {
+          final var caller = executor.submit(user::get);
+          executor.execute(
+              () -> {
+                Thread.currentThread()
+                    .setUncaughtExceptionHandler((thread, thrown) -> uncaught.complete(thrown));
+                await(releaseFailure);
+                throw failure;
+              });
+          final var next = executor.submit(() -> Thread.currentThread().isVirtual());
+          releaseFailure.countDown();
+          assertSame(failure, uncaught.get(5, TimeUnit.SECONDS));
+          assertTrue(next.get(5, TimeUnit.SECONDS));
+          assertFalse(caller.isDone());
+          stage.complete("Ada");
+          assertEquals("Ada", caller.get(5, TimeUnit.SECONDS));
+        } finally {
+          releaseFailure.countDown();
+          stage.complete("Ada");
+        }
+      }
+    }
+
+    @Test
+    void failedHelpedLaunchRequeuesTheFutureAndReturnsThePermit() throws Exception {
+      final var stage = new CompletableFuture<String>();
+      final var user = Blockless.supplier(stage);
+      final var enterGet = new CountDownLatch(1);
+      final var launches = new AtomicInteger();
+      final var launchFailure = new RejectedExecutionException("helped launch failed");
+      try (final var executor =
+          new LazyHelpingExecutor(
+              1,
+              Executors.defaultThreadFactory(),
+              new Semaphore(1),
+              factory ->
+                  runner -> {
+                    final var thread = factory.newThread(runner);
+                    if (launches.incrementAndGet() == 1) throw launchFailure;
+                    return thread;
+                  })) {
+        try {
+          final var caller =
+              executor.submit(
+                  () -> {
+                    enterGet.await();
+                    assertSame(
+                        launchFailure, assertThrows(RejectedExecutionException.class, user::get));
+                    return user.get();
+                  });
+          final var queued = executor.submit(() -> Thread.currentThread().isVirtual());
+          executor.shutdown();
+          enterGet.countDown();
+          assertTrue(queued.get(5, TimeUnit.SECONDS));
+          assertEquals(2, launches.get());
+          assertFalse(caller.isDone());
+          stage.complete("Ada");
+          assertEquals("Ada", caller.get(5, TimeUnit.SECONDS));
+        } finally {
+          enterGet.countDown();
+          stage.complete("Ada");
+        }
       }
     }
 
