@@ -252,12 +252,13 @@ class LazyHelpingExecutorTest {
     }
 
     @Test
-    void failedHelpedLaunchRequeuesTheFutureAndReturnsThePermit() throws Exception {
+    void failedHelpedLaunchFallsBackToWaitingAndRequeuesTheTask() throws Exception {
       final var stage = new CompletableFuture<String>();
       final var user = Blockless.supplier(stage);
+      final var nextResult = new CompletableFuture<Boolean>();
       final var enterGet = new CountDownLatch(1);
+      final var launchAttempted = new CountDownLatch(1);
       final var launches = new AtomicInteger();
-      final var launchFailure = new RejectedExecutionException("helped launch failed");
       try (final var executor =
           new LazyHelpingExecutor(
               1,
@@ -266,7 +267,10 @@ class LazyHelpingExecutorTest {
               factory ->
                   runner -> {
                     final var thread = factory.newThread(runner);
-                    if (launches.incrementAndGet() == 1) throw launchFailure;
+                    if (launches.incrementAndGet() == 1) {
+                      launchAttempted.countDown();
+                      throw new RejectedExecutionException("helped launch failed");
+                    }
                     return thread;
                   })) {
         try {
@@ -274,21 +278,29 @@ class LazyHelpingExecutorTest {
               executor.submit(
                   () -> {
                     enterGet.await();
-                    assertSame(
-                        launchFailure, assertThrows(RejectedExecutionException.class, user::get));
                     return user.get();
                   });
-          final var queued = executor.submit(() -> Thread.currentThread().isVirtual());
+          // The requeued task runs on the platform worker and can help during its own wait.
+          final var queued =
+              executor.submit(
+                  () -> {
+                    assertFalse(Thread.currentThread().isVirtual());
+                    return Blockless.get(nextResult);
+                  });
+          executor.execute(() -> nextResult.complete(Thread.currentThread().isVirtual()));
           executor.shutdown();
           enterGet.countDown();
-          assertTrue(queued.get(5, TimeUnit.SECONDS));
-          assertEquals(2, launches.get());
-          assertFalse(caller.isDone());
+          assertTrue(launchAttempted.await(5, TimeUnit.SECONDS));
+          assertThrows(TimeoutException.class, () -> caller.get(50, TimeUnit.MILLISECONDS));
+          assertFalse(queued.isDone());
           stage.complete("Ada");
           assertEquals("Ada", caller.get(5, TimeUnit.SECONDS));
+          assertTrue(queued.get(5, TimeUnit.SECONDS));
+          assertEquals(2, launches.get());
         } finally {
           enterGet.countDown();
           stage.complete("Ada");
+          nextResult.complete(false);
         }
       }
     }

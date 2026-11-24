@@ -28,6 +28,9 @@ import java.util.function.UnaryOperator;
  * available. Its stack, thread identity and thread-local state stay on the original worker; helped
  * tasks run on separate virtual threads. Other blocking calls do not help.
  *
+ * <p>If starting a helped task throws a runtime exception, the platform worker ends helping for
+ * that wait and continues waiting for its own result.
+ *
  * <p>The worker count limits platform workers. Even one platform worker can dispatch concurrent
  * virtual tasks. The optional {@code maxHelped} parameter caps concurrently running helped tasks
  * across the executor. Size it to the downstream resource, such as the database connection pool.
@@ -153,13 +156,14 @@ public final class LazyHelpingExecutor extends AbstractExecutorService {
     }
   }
 
-  void helpUntil(CountDownLatch latch) throws InterruptedException {
+  // Returns false when the caller should finish waiting directly on the latch.
+  boolean helpUntil(CountDownLatch latch) throws InterruptedException {
     while (true) {
       Dispatch abandoned = null;
       Throwable launchFailure = null;
       state.lockInterruptibly();
       try {
-        if (latch.getCount() == 0) return;
+        if (latch.getCount() == 0) return true;
         if (!(queue.peek() instanceof Dispatch)
             || (helpedPermits != null && !helpedPermits.tryAcquire())) {
           waitingHelpers++;
@@ -187,7 +191,8 @@ public final class LazyHelpingExecutor extends AbstractExecutorService {
           launchFailure = failure;
           if (requeueFailedLaunch(dispatch, failure)) abandoned = null;
           if (waitingHelpers > 0) progress.signalAll();
-          throw failure;
+          if (failure instanceof Error error) throw error;
+          return false;
         } finally {
           launching.remove();
         }
