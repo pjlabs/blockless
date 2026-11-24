@@ -53,6 +53,13 @@ var answer = Blockless.get(() -> expensiveComputation());
 
 ## Experimental: lazy helping
 
+"Lazy helping" is a descriptive working name chosen for this implementation,
+not the name of a standard Java feature. "Lazy" means it activates during a
+supported wait; "helping" means the waiting worker dispatches queued tasks.
+Related task helping exists in the JDK, for example
+[`ForkJoinTask.helpQuiesce()`](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ForkJoinTask.html#helpQuiesce()).
+That method executes tasks; this executor dispatches them onto virtual threads.
+
 Create a helping executor once, then submit the outer task containing the wait:
 
 ```java
@@ -75,9 +82,43 @@ must hand off the task and return instead of waiting for the outer Future.
 
 Tasks normally start on platform workers. While a worker waits in a pending
 `Blockless.get()`, supplier `get()`, or `Parallel.async(...).get()`, it checks its
-executor's queue and starts queued tasks on virtual threads. Helping starts only
-when a supported wait occurs, hence **lazy helping**. Completion wakes the
-original caller, and `get()` returns the real value or throws the task's failure.
+executor's queue and starts queued tasks on virtual threads. Completion wakes
+the original caller, and `get()` returns the real value or throws the task's failure.
+
+### Five requests with one platform worker
+
+Use `LazyHelpingExecutor.newFixedThreadPool(1)`. Assume request 1's I/O stays
+pending while requests 2–5 arrive, and each request uses one supplier:
+
+```java
+var user = Blockless.supplier(() -> loadUser(id));
+return user.get();
+```
+
+Platform worker `P` starts request 1. Its supplier starts an I/O virtual thread.
+At `get()`, `P` enters the helping loop while retaining request 1's stack.
+It takes queued requests 2–5 and starts each on a separate virtual thread.
+Those requests run the same code, each starting its own I/O virtual thread.
+
+| Request | Thread running request code | While its supplier is pending |
+|---|---|---|
+| 1 | Platform worker `P` | Helps dispatch queued requests |
+| 2 | Virtual thread `V2` | Parks |
+| 3 | Virtual thread `V3` | Parks |
+| 4 | Virtual thread `V4` | Parks |
+| 5 | Virtual thread `V5` | Parks |
+
+Once the queue is empty, `P` waits for more queued work or request 1's result.
+If request 3's I/O finishes first, the JDK resumes `V3` after its `get()` and
+request 3 completes independently of `P`. When request 1's I/O finishes, `P`
+exits its helping loop, its `get()` returns, and request 1 continues normally.
+
+If all five I/O bodies are pending at once, there is one platform request
+worker, four started virtual caller threads and five virtual supplier-body
+threads. The virtual threads share the JDK's native carrier threads. `P`
+dispatches all five requests; only request 1's business code runs directly on `P`.
+
+### Scope and shutdown
 
 The original caller retains its native stack, thread identity, locals and lock
 ownership. With no queued work, it waits for a signal. Helped tasks have their own
@@ -96,6 +137,8 @@ queued Future tasks.
 This is an opt-in, experimental executor using public Java 21 APIs. It needs no
 agent, bytecode rewriting, preview features or exports/opens. It helps only its
 own queue; arbitrary existing pools are not intercepted.
+
+### JVM support and measurements
 
 Confirmed core tests on these JVMs:
 
