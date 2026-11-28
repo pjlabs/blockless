@@ -275,11 +275,11 @@ shared queue. An idle worker may take a submission immediately. A worker inside
 a helping wait can also take queued tasks and launch them on virtual threads.
 Only this executor's queue is visible to helping.
 
-The helper executor uses `Executors.newThreadPerTaskExecutor` with a factory that
-returns virtual threads. It tracks started tasks until they actually exit. The
-JDK schedules and resumes those threads; they do not depend on their launching
-platform worker continuing to help. Remaining queued tasks are taken by normal
-platform workers or another helping worker.
+One task registry owns accepted work until its body or shutdown cancellation
+cleanup finishes. A helping worker starts queued tasks directly on virtual
+threads. The JDK schedules and resumes those threads; they do not depend on
+their launching platform worker continuing to help. Remaining queued tasks are
+taken by normal platform workers or another helping worker.
 
 ### Scope and shutdown
 
@@ -294,38 +294,27 @@ The original platform worker waits for a signal when it has no queued work to
 launch or the helping cap has been reached. Its stack stays on that worker
 throughout the wait.
 
-`shutdown()` rejects new submissions, processes accepted queued tasks and waits
-for running outer tasks, including helped tasks, to exit. A cancelled Future
+`shutdown()` rejects new submissions and returns without waiting. Accepted tasks
+continue processing; use `awaitTermination()` or `close()` to wait for running
+outer tasks, including helped tasks, to exit. A cancelled Future
 can be done before its task's `finally` finishes, so termination tracks actual
 task exit. `shutdownNow()` interrupts running tasks and cancels queued Future
 tasks. Supplier bodies retain their existing separate lifetime and are not
 cancelled with a waiting caller.
 
+If starting a helped thread fails, the current `get()` throws that failure. The
+unstarted task stays queued for a platform worker, and other callers can still
+read the shared supplier's outcome. This frees the waiting platform worker to
+process queued work instead of leaving it blocked on a queued completion task.
+
 This opt-in, experimental executor uses public Java 21 APIs. It needs no agent,
 bytecode rewriting, preview features or exports/opens.
 
-### JVM support and measurements
+### JVM support
 
 On Java 21, helped tasks that block inside `synchronized` code pin a carrier
 thread. For workloads with this blocking pattern, use Java 24 or later, which
 removes pinning due to synchronization through [JEP 491](https://openjdk.org/jeps/491).
-
-Confirmed core tests on these JVMs:
-
-| JVM | Java 21 | Java 25 |
-|---|---|---|
-| Amazon Corretto | 21.0.13.1+2 | 25.0.5.1+2 |
-| Oracle HotSpot | 21.0.12.1+1 | 25.0.5.1+4 |
-
-A local Corretto 21 gRPC comparison measured 368 requests/s for the ordinary
-four-worker pool, 939 for lazy helping and 932 for a virtual-thread executor.
-All 33,696 measured requests succeeded. These are medians of five samples after
-ten seconds warmup, with ten database connections, 10 ms simulated query I/O and
-32 concurrent requests. Lazy helping retained four platform request workers.
-Two shared virtual-thread carriers were observed in both pool modes during
-the measurement.
-
-<!-- TODO Add a repository-relative link when the benchmark fixture is available here. -->
 
 ### About the name
 

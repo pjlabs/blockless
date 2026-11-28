@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.ArrayList;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
@@ -252,27 +253,25 @@ class LazyHelpingExecutorTest {
     }
 
     @Test
-    void failedHelpedLaunchFallsBackToWaitingAndRequeuesTheTask() throws Exception {
+    void failedHelpedLaunchUnwindsWaitAndLetsQueuedCompletionRun() throws Exception {
       final var stage = new CompletableFuture<String>();
       final var user = Blockless.supplier(stage);
-      final var nextResult = new CompletableFuture<Boolean>();
       final var enterGet = new CountDownLatch(1);
       final var launchAttempted = new CountDownLatch(1);
       final var launches = new AtomicInteger();
+      final var failure = new RejectedExecutionException("helped launch failed");
       try (final var executor =
           new LazyHelpingExecutor(
               1,
               Executors.defaultThreadFactory(),
-              new Semaphore(1),
-              factory ->
-                  runner -> {
-                    final var thread = factory.newThread(runner);
-                    if (launches.incrementAndGet() == 1) {
-                      launchAttempted.countDown();
-                      throw new RejectedExecutionException("helped launch failed");
-                    }
-                    return thread;
-                  })) {
+              1,
+              thread -> {
+                if (launches.incrementAndGet() == 1) {
+                  launchAttempted.countDown();
+                  throw failure;
+                }
+                thread.start();
+              })) {
         try {
           final var caller =
               executor.submit(
@@ -280,27 +279,29 @@ class LazyHelpingExecutorTest {
                     enterGet.await();
                     return user.get();
                   });
-          // The requeued task runs on the platform worker and can help during its own wait.
+          // Only queued work can complete stage; the test thread never completes it on success.
           final var queued =
               executor.submit(
                   () -> {
                     assertFalse(Thread.currentThread().isVirtual());
-                    return Blockless.get(nextResult);
+                    stage.complete("Ada");
+                    return "completed";
                   });
-          executor.execute(() -> nextResult.complete(Thread.currentThread().isVirtual()));
           executor.shutdown();
           enterGet.countDown();
           assertTrue(launchAttempted.await(5, TimeUnit.SECONDS));
-          assertThrows(TimeoutException.class, () -> caller.get(50, TimeUnit.MILLISECONDS));
-          assertFalse(queued.isDone());
-          stage.complete("Ada");
-          assertEquals("Ada", caller.get(5, TimeUnit.SECONDS));
-          assertTrue(queued.get(5, TimeUnit.SECONDS));
-          assertEquals(2, launches.get());
+          assertSame(
+              failure,
+              assertThrows(ExecutionException.class, () -> caller.get(5, TimeUnit.SECONDS))
+                  .getCause());
+          assertEquals("completed", queued.get(5, TimeUnit.SECONDS));
+          assertEquals("Ada", stage.get(5, TimeUnit.SECONDS));
+          assertEquals("Ada", user.get());
+          assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+          assertEquals(1, launches.get());
         } finally {
           enterGet.countDown();
           stage.complete("Ada");
-          nextResult.complete(false);
         }
       }
     }

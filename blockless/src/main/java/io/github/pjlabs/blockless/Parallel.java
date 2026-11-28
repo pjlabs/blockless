@@ -106,6 +106,10 @@ public final class Parallel {
    * Runs a supplier on a virtual thread with context propagation. Returns a {@link Supplier} whose
    * {@code get()} blocks until the result is available.
    *
+   * <p>Once the task has finished, {@code get()} returns its outcome even if the caller is
+   * interrupted. An interruption while waiting affects only that caller: its {@code get()} throws
+   * and keeps the interrupt flag, and the task keeps running.
+   *
    * <p>{@link #withMaxConcurrency(int)} does not affect this method — it only controls the sliding
    * window in {@link #map} and {@link #toEither}. For bounded batch work, use {@link #map}.
    */
@@ -271,12 +275,15 @@ public final class Parallel {
 
     // Waits until the future settles. orTimeout opens the latch without the worker exiting.
     R await() {
-      try {
-        HelpingWait.await(latch);
-      } catch (InterruptedException e) {
-        // Interruption ends only this caller's wait; other callers still share the outcome.
-        Thread.currentThread().interrupt();
-        throw new RuntimeException(e);
+      // Skip the wait once settled, so an interrupted caller still gets the outcome.
+      if (!result.isDone()) {
+        try {
+          HelpingWait.await(latch);
+        } catch (InterruptedException e) {
+          // Interruption ends only this caller's wait; other callers still share the outcome.
+          Thread.currentThread().interrupt();
+          throw new RuntimeException(e);
+        }
       }
       return switch (result.state()) {
         case SUCCESS -> result.resultNow();

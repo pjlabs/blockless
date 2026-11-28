@@ -34,7 +34,7 @@ final class HelpingWait {
           return result;
         });
     try {
-      if (owner.helpUntil(latch)) return;
+      owner.helpUntil(latch);
     } finally {
       WAITERS.computeIfPresent(
           latch,
@@ -43,7 +43,6 @@ final class HelpingWait {
             return registrations.isEmpty() ? null : registrations;
           });
     }
-    latch.await();
   }
 
   static void signal(CountDownLatch latch) {
