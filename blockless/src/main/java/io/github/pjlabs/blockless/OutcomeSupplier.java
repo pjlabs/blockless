@@ -23,6 +23,7 @@ final class OutcomeSupplier<T> implements Supplier<T> {
       }
     } finally {
       latch.countDown();
+      HelpingWait.signal(latch);
     }
   }
 
@@ -31,7 +32,7 @@ final class OutcomeSupplier<T> implements Supplier<T> {
     // Skip await() once completed, so an interrupted caller still gets the outcome.
     if (!result.isDone()) {
       try {
-        latch.await();
+        HelpingWait.await(latch);
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
         throw new RuntimeException(e);
